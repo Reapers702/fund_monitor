@@ -1,0 +1,13 @@
+node_modules
+dist
+out
+.DS_Store
+.eslintcache
+*.log*
+
+# 本地凭据（含数据库密码，勿提交）
+.env
+.env.local
+
+# 开发调试产物（截图/抓取缓存/临时编译）
+.shots/

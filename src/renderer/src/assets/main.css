@@ -1,0 +1,12 @@
+@import './base.css';
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background-color: var(--color-background);
+  user-select: none;
+}
+
+#app {
+  min-height: 100vh;
+}
