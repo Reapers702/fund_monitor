@@ -2,7 +2,7 @@
 import { ref, onMounted, computed } from 'vue'
 import {
   NCard, NTable, NTag, NButton, NInput, NInputNumber, NSelect, NDatePicker,
-  NSpace, NEmpty, useMessage
+  NSpace, NEmpty, NForm, NFormItem, NAlert, useMessage
 } from 'naive-ui'
 
 const message = useMessage()
@@ -186,21 +186,43 @@ onMounted(load)
       </template>
 
       <div v-if="showForm" class="trade-form">
-        <n-select v-model:value="form.fundCode" :options="formFunds" placeholder="选择基金" class="f-field" />
-        <n-select
-          v-model:value="form.tradeType"
-          :options="[
-            { label: '买入', value: 'buy' },
-            { label: '卖出', value: 'sell' }
-          ]"
-          class="f-field"
-        />
-        <n-input-number v-model:value="form.shares" :min="0" :precision="2" placeholder="份额" class="f-field" />
-        <n-input-number v-model:value="form.price" :min="0" :precision="4" placeholder="净值/价格" class="f-field" />
-        <n-input-number v-model:value="form.fee" :min="0" :precision="2" placeholder="手续费" class="f-field" />
-        <n-date-picker v-model:value="form.rawDate" type="datetime" class="f-field" />
-        <n-input v-model:value="form.note" placeholder="备注（可选）" class="f-field" />
-        <n-button type="primary" @click="submit">保存</n-button>
+        <n-form label-placement="left" label-width="90" :show-feedback="false" class="trade-form-inner">
+          <n-form-item label="基金">
+            <n-select v-model:value="form.fundCode" :options="formFunds" placeholder="选择要录入的基金" class="f-field" />
+          </n-form-item>
+          <n-form-item label="操作">
+            <n-select
+              v-model:value="form.tradeType"
+              :options="[
+                { label: '买入（加仓）', value: 'buy' },
+                { label: '卖出（减仓）', value: 'sell' }
+              ]"
+              class="f-field"
+            />
+          </n-form-item>
+          <n-form-item label="份额">
+            <n-input-number v-model:value="form.shares" :min="0" :precision="2" placeholder="如 1000.00" class="f-field" />
+          </n-form-item>
+          <n-form-item label="成交净值">
+            <n-input-number v-model:value="form.price" :min="0" :precision="4" placeholder="如 1.8500" class="f-field" />
+          </n-form-item>
+          <n-form-item label="手续费">
+            <n-input-number v-model:value="form.fee" :min="0" :precision="2" placeholder="如 1.50，可填 0" class="f-field" />
+          </n-form-item>
+          <n-form-item label="交易时间">
+            <n-date-picker v-model:value="form.rawDate" type="datetime" class="f-field" />
+          </n-form-item>
+          <n-form-item label="备注">
+            <n-input v-model:value="form.note" placeholder="可选，如：定投 / 止盈" class="f-field" />
+          </n-form-item>
+        </n-form>
+        <div class="trade-form-foot">
+          <n-button type="primary" @click="submit">保存交易</n-button>
+          <n-button @click="showForm = false">取消</n-button>
+        </div>
+        <n-alert type="info" :bordered="false" class="trade-form-tip">
+          份额 = 买入/卖出的基金份数；成交净值 = 交易当日的基金单位净值。买入按份额×净值+手续费计入成本，卖出按（净值−平均成本）×份额−手续费计已实现盈亏。
+        </n-alert>
       </div>
 
       <div class="trade-list">
@@ -301,14 +323,27 @@ onMounted(load)
 }
 
 .trade-form {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
   padding: 12px 0 16px;
 }
 
+.trade-form-inner {
+  max-width: 640px;
+}
+
 .f-field {
-  width: 160px;
+  width: 220px;
+}
+
+.trade-form-foot {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  padding-left: 90px;
+}
+
+.trade-form-tip {
+  margin-top: 12px;
+  max-width: 640px;
 }
 
 .no-trade {

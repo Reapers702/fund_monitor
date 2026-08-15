@@ -165,6 +165,21 @@ if (process.argv.includes('--check')) {
     win.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
         try {
+          // 路由就绪后再切 hash（executeJavaScript 在 did-finish-load 前执行会被 Vue 路由初始化覆盖）
+          await win.webContents.executeJavaScript(`window.location.hash = '#' + ${JSON.stringify(hashRoute)}`).catch(() => {})
+          // 等 Vue 路由渲染（hashchange → 组件挂载）
+          await new Promise((res) => setTimeout(res, 800))
+          const curHash = await win.webContents.executeJavaScript('location.hash').catch(() => '')
+          if (process.argv.includes('--expand-form')) console.log('[screenshot] hash after route:', curHash)
+          // 开发验证：--expand-form 时点击"录入交易"按钮展开表单（持仓页截图用）
+          if (process.argv.includes('--expand-form')) {
+            await win.webContents
+              .executeJavaScript(
+                `[...document.querySelectorAll('button')].find(b => b.textContent?.includes('录入交易'))?.click()`
+              )
+              .catch(() => {})
+            await new Promise((res) => setTimeout(res, 500))
+          }
           // 开发验证：--ipc-test 时加载完成后调一次 quotes:run 并打印结果
           if (process.argv.includes('--ipc-test')) {
             const r = await win.webContents.executeJavaScript(
@@ -197,7 +212,6 @@ if (process.argv.includes('--check')) {
         }
       }, 2500)
     })
-    win.webContents.executeJavaScript(`window.location.hash = '#' + ${JSON.stringify(hashRoute)}`).catch(() => {})
   })
 } else {
   // This method will be called when Electron has finished
