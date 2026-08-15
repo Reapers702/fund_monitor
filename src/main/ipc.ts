@@ -22,6 +22,7 @@ import { runAnalyzeAllCore } from './analyze'
 import { getSchedulerState } from './scheduler'
 import { computePosition, listPositions, listTrades, addTrade, deleteTrade, getProfile, saveProfile } from './position/position'
 import type { TradeRow } from './position/position'
+import { getCurrentUserId, setCurrentUserId, ensureDefaultUser, listUsers, createUser } from './user'
 
 /**
  * 注册主进程 IPC 处理器（渲染进程经 preload 的 window.api 调用）。
@@ -63,13 +64,60 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     }
   })
 
-  // ---------- 基金 ----------
+  // ---------- 用户（多用户 M9：无密码按名字切换；自选/持仓/建议按用户隔离） ----------
+
+  // 当前用户
+  ipcMain.handle('user:getCurrent', async (): Promise<{ id: number; name: string }> => {
+    const cfg = loadConfig()
+    const pool = createPool(cfg)
+    try {
+      const r = await pool.query<{ id: number; name: string }>('SELECT id, name FROM app_user WHERE id = $1', [
+        getCurrentUserId()
+      ])
+      if (r.rows.length === 0) return { id: 1, name: 'guanxin' }
+      return r.rows[0]
+    } finally {
+      await pool.end().catch(() => {})
+    }
+  })
+
+  // 用户列表
+  ipcMain.handle('user:list', async (): Promise<AppUserRow[]> => {
+    const cfg = loadConfig()
+    const pool = createPool(cfg)
+    try {
+      await ensureDefaultUser(pool)
+      return await listUsers(pool)
+    } finally {
+      await pool.end().catch(() => {})
+    }
+  })
+
+  // 新建用户并切换为当前用户
+  ipcMain.handle('user:create', async (_e, name: string): Promise<{ id: number; name: string }> => {
+    const cfg = loadConfig()
+    const pool = createPool(cfg)
+    try {
+      const id = await createUser(pool, name)
+      setCurrentUserId(id)
+      return { id, name: name.trim() }
+    } finally {
+      await pool.end().catch(() => {})
+    }
+  })
+
+  // 切换当前用户（前端随后整页刷新）
+  ipcMain.handle('user:switch', (_e, id: number): void => {
+    setCurrentUserId(id)
+  })
+
+  // ---------- 基金（自选按当前用户，基金数据全局共享） ----------
 
   ipcMain.handle('funds:list', async (): Promise<FundCard[]> => {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      return await listFunds(pool)
+      return await listFunds(pool, getCurrentUserId())
     } catch (e) {
       console.error('[ipc] funds:list 失败:', (e as Error).message)
       throw e
@@ -78,13 +126,19 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     }
   })
 
-  // 添加/同步基金（详情 + 净值增量/补种 + 持仓），返回同步结果
+  // 添加/同步基金（详情 + 净值增量/补种 + 持仓）+ 加入当前用户自选；基金数据全局共享不重复抓取
   ipcMain.handle('funds:add', async (_e, code: string): Promise<FundSyncResult> => {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
       await ensureSchema(pool)
-      return await syncFund(pool, code, (s) => console.log(`[ipc funds:add] ${s}`))
+      const r = await syncFund(pool, code, (s) => console.log(`[ipc funds:add] ${s}`))
+      await pool.query(
+        `INSERT INTO user_fund (user_id, fund_code, is_active) VALUES ($1, $2, 1)
+         ON CONFLICT (user_id, fund_code) DO UPDATE SET is_active = 1, updated_at = now()`,
+        [getCurrentUserId(), code]
+      )
+      return r
     } catch (e) {
       console.error(`[ipc] funds:add ${code} 失败:`, (e as Error).message)
       throw e
@@ -93,12 +147,13 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     }
   })
 
-  // 停用/启用（is_active 1/0）
+  // 停用/启用（当前用户自选）
   ipcMain.handle('funds:toggle', async (_e, code: string, active: boolean): Promise<void> => {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      await pool.query('UPDATE fund_basic SET is_active = $2, updated_at = now() WHERE fund_code = $1', [
+      await pool.query('UPDATE user_fund SET is_active = $3, updated_at = now() WHERE user_id = $1 AND fund_code = $2', [
+        getCurrentUserId(),
         code,
         active ? 1 : 0
       ])
@@ -113,12 +168,13 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
+      const uid = getCurrentUserId()
       const [basic, nav, est, holdings, advice] = await Promise.all([
         fundBasic(pool, code),
         navSeries(pool, code, days),
         estimateSeries(pool, code),
         latestHoldings(pool, code),
-        adviceList(pool, code)
+        adviceList(pool, code, uid)
       ])
       return { basic, nav, estimate: est, holdings, advice }
     } finally {
@@ -126,17 +182,18 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     }
   })
 
-  // 手动触发单基金 AI 分析（详情页"立即分析"按钮；写入 ds_advice + 非 hold 桌面通知）
+  // 手动触发单基金 AI 分析（详情页"立即分析"按钮；按当前用户持仓计算建议，写 ds_advice + 非 hold 桌面通知）
   ipcMain.handle('advice:analyze', async (_e, code: string): Promise<AdviceRunResult> => {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     const aiFundPool = createAiFundPool(cfg)
     try {
       await ensureSchema(pool)
-      const r = await analyzeFund({ pool, aiFundPool }, code, null)
+      const uid = getCurrentUserId()
+      const r = await analyzeFund({ pool, aiFundPool }, code, null, uid)
       if (!r) return { ok: false, skipped: true, reason: '未配置 Key 或数据不足', advice: null }
       const tradeDate = todayStr()
-      const inserted = await saveAdvice(pool, code, r, tradeDate)
+      const inserted = await saveAdvice(pool, code, r, tradeDate, uid)
       if (r.action !== 'hold') {
         const basic = await fundBasic(pool, code)
         notifyAdvice(basic?.name ?? code, code, r.action, r.confidence, r.reason)
@@ -185,12 +242,12 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     }
   })
 
-  // 估值说明页：各基金最新估值来源 + 名称规则匹配结果（不拉实时行情）
+  // 估值说明页：当前用户自选基金的最新估值来源 + 名称规则匹配结果（不拉实时行情）
   ipcMain.handle('estimate:guide', async (): Promise<EstimateGuideFund[]> => {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      const rows = await estimateGuide(pool)
+      const rows = await estimateGuide(pool, getCurrentUserId())
       return rows.map((r) => {
         const match = findTrackingIndex(r.name)
         return {
@@ -212,12 +269,12 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     }
   })
 
-  // 估值误差统计（估值说明页：各基金 T1/T2/T3 最近 N 日估值 vs 实际净值误差）
+  // 估值误差统计（估值说明页：当前用户自选基金各估值方式最近 N 日误差）
   ipcMain.handle('estimate:diff', async (_e, days = 20): Promise<EstimateDiffStat[]> => {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      return await estimateDiffStats(pool, days)
+      return await estimateDiffStats(pool, getCurrentUserId(), days)
     } catch (e) {
       console.error('[ipc] estimate:diff 失败:', (e as Error).message)
       throw e
@@ -247,7 +304,7 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      return await listPositions(pool)
+      return await listPositions(pool, getCurrentUserId())
     } finally {
       await pool.end().catch(() => {})
     }
@@ -257,7 +314,8 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      const [summary, trades] = await Promise.all([computePosition(pool, code), listTrades(pool, code)])
+      const uid = getCurrentUserId()
+      const [summary, trades] = await Promise.all([computePosition(pool, uid, code), listTrades(pool, uid, code)])
       return { summary, trades }
     } finally {
       await pool.end().catch(() => {})
@@ -268,8 +326,9 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      const id = await addTrade(pool, t)
-      const summary = await computePosition(pool, t.fundCode)
+      const uid = getCurrentUserId()
+      const id = await addTrade(pool, uid, t)
+      const summary = await computePosition(pool, uid, t.fundCode)
       return { id, summary }
     } finally {
       await pool.end().catch(() => {})
@@ -280,7 +339,7 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      return await deleteTrade(pool, id)
+      return await deleteTrade(pool, getCurrentUserId(), id)
     } finally {
       await pool.end().catch(() => {})
     }
@@ -290,11 +349,12 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
+      const uid = getCurrentUserId()
       if (patch) {
-        const cur = await getProfile(pool)
-        await saveProfile(pool, { buyFeePct: patch.buyFeePct ?? cur.buyFeePct, sellFeePct: patch.sellFeePct ?? cur.sellFeePct })
+        const cur = await getProfile(pool, uid)
+        await saveProfile(pool, uid, { buyFeePct: patch.buyFeePct ?? cur.buyFeePct, sellFeePct: patch.sellFeePct ?? cur.sellFeePct })
       }
-      return await getProfile(pool)
+      return await getProfile(pool, uid)
     } finally {
       await pool.end().catch(() => {})
     }

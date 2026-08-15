@@ -20,7 +20,7 @@ export interface FundCard {
   adviceDate: string | null // 建议交易日 YYYY-MM-DD
 }
 
-export async function listFunds(pool: Pool): Promise<FundCard[]> {
+export async function listFunds(pool: Pool, userId: number): Promise<FundCard[]> {
   const r = await pool.query<{
     fund_code: string
     fund_name: string
@@ -33,21 +33,24 @@ export async function listFunds(pool: Pool): Promise<FundCard[]> {
     advice_confidence: string | null
     advice_date: string | null
   }>(
-    `SELECT f.fund_code, f.fund_name, f.is_active,
+    `SELECT f.fund_code, f.fund_name, uf.is_active,
             n.trade_date, n.dwjz, n.jzzzl,
             (SELECT to_char(max(report_date), 'YYYY-MM-DD') FROM fund_holdings h WHERE h.fund_code = f.fund_code) AS holdings_date,
             a.action AS advice_action, a.confidence AS advice_confidence,
             to_char(a.trade_date, 'YYYY-MM-DD') AS advice_date
-     FROM fund_basic f
+     FROM user_fund uf
+     JOIN fund_basic f ON f.fund_code = uf.fund_code
      LEFT JOIN LATERAL (
        SELECT trade_date, dwjz, jzzzl FROM fund_nav_daily
        WHERE fund_code = f.fund_code ORDER BY trade_date DESC LIMIT 1
      ) n ON true
      LEFT JOIN LATERAL (
        SELECT action, confidence, trade_date FROM ds_advice
-       WHERE fund_code = f.fund_code ORDER BY trade_date DESC, id DESC LIMIT 1
+       WHERE fund_code = f.fund_code AND user_id = $1 ORDER BY trade_date DESC, id DESC LIMIT 1
      ) a ON true
-     ORDER BY f.is_active DESC, f.fund_code`
+     WHERE uf.user_id = $1
+     ORDER BY uf.is_active DESC, f.fund_code`,
+    [userId]
   )
   // 估值单独查（最新一次采样；盘中高频，无需按服务器日期过滤——采样本身就在交易时段）
   const ests = await pool.query<{ fund_code: string; est_pct: string | null; est_time: Date; source: string }>(
@@ -216,11 +219,11 @@ export interface AdviceRow {
   createdAt: string
 }
 
-export async function adviceList(pool: Pool, code: string, limit = 20): Promise<AdviceRow[]> {
+export async function adviceList(pool: Pool, code: string, userId: number, limit = 20): Promise<AdviceRow[]> {
   const r = await pool.query<{ id: number; trade_date: Date; action: string; reason: string | null; confidence: string | null; created_at: Date }>(
     `SELECT id, trade_date, action, reason, confidence, created_at FROM ds_advice
-     WHERE fund_code = $1 ORDER BY trade_date DESC, id DESC LIMIT $2`,
-    [code, limit]
+     WHERE fund_code = $1 AND user_id = $2 ORDER BY trade_date DESC, id DESC LIMIT $3`,
+    [code, userId, limit]
   )
   return r.rows.map((x) => ({
     id: x.id,
@@ -244,10 +247,14 @@ export interface EstimateGuideRow {
   holdingsDate: string | null // 最近季报报告期（T3 兜底是否可用）
 }
 
-/** 估值说明页数据：基金列表 + 最新估值来源 + 最近持仓报告期 */
-export async function estimateGuide(pool: Pool): Promise<EstimateGuideRow[]> {
+/** 估值说明页数据：当前用户自选基金 + 最新估值来源 + 最近持仓报告期 */
+export async function estimateGuide(pool: Pool, userId: number): Promise<EstimateGuideRow[]> {
   const funds = await pool.query<{ fund_code: string; fund_name: string; is_active: number }>(
-    'SELECT fund_code, fund_name, is_active FROM fund_basic ORDER BY is_active DESC, fund_code'
+    `SELECT f.fund_code, f.fund_name, uf.is_active
+     FROM user_fund uf JOIN fund_basic f ON f.fund_code = uf.fund_code
+     WHERE uf.user_id = $1
+     ORDER BY uf.is_active DESC, f.fund_code`,
+    [userId]
   )
   const ests = await pool.query<{ fund_code: string; est_pct: string | null; est_time: Date; source: string }>(
     `SELECT DISTINCT ON (fund_code) fund_code, est_pct, est_time, source
@@ -288,8 +295,8 @@ export interface EstimateDiffStat {
   latestNav: number | null
 }
 
-/** 最近 days 个自然日内每基金每种估值方式的误差统计 + 最新一条明细 */
-export async function estimateDiffStats(pool: Pool, days = 20): Promise<EstimateDiffStat[]> {
+/** 最近 days 个自然日内当前用户自选基金每种估值方式的误差统计 + 最新一条明细 */
+export async function estimateDiffStats(pool: Pool, userId: number, days = 20): Promise<EstimateDiffStat[]> {
   const stats = await pool.query<{
     fund_code: string
     fund_name: string
@@ -304,10 +311,11 @@ export async function estimateDiffStats(pool: Pool, days = 20): Promise<Estimate
             round(avg(d.diff_pct)::numeric, 3) AS avg_diff
      FROM fund_estimate_diff d
      JOIN fund_basic b ON b.fund_code = d.fund_code
-     WHERE d.trade_date > CURRENT_DATE - make_interval(days => $1)
+     JOIN user_fund uf ON uf.fund_code = d.fund_code AND uf.user_id = $1
+     WHERE d.trade_date > CURRENT_DATE - make_interval(days => $2)
      GROUP BY d.fund_code, b.fund_name, d.source
      ORDER BY d.fund_code, d.source`,
-    [days]
+    [userId, days]
   )
   const latest = await pool.query<{
     fund_code: string

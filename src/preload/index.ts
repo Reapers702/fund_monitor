@@ -7,6 +7,10 @@ const api: FundApi = {
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getAppInfo'),
   getAutoLaunch: (): Promise<boolean> => ipcRenderer.invoke('app:getAutoLaunch'),
   setAutoLaunch: (enabled: boolean): Promise<boolean> => ipcRenderer.invoke('app:setAutoLaunch', enabled),
+  userGetCurrent: (): Promise<CurrentUser> => ipcRenderer.invoke('user:getCurrent'),
+  userList: (): Promise<AppUserRow[]> => ipcRenderer.invoke('user:list'),
+  userCreate: (name: string): Promise<CurrentUser> => ipcRenderer.invoke('user:create', name),
+  userSwitch: (id: number): Promise<void> => ipcRenderer.invoke('user:switch', id),
 
   fundsList: (): Promise<FundCard[]> => ipcRenderer.invoke('funds:list'),
   fundsAdd: (code: string): Promise<FundSyncResult> => ipcRenderer.invoke('funds:add', code),

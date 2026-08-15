@@ -1,6 +1,6 @@
 import { Pool } from 'pg'
 import type { AppConfig, PgConfig } from '../config'
-import { SCHEMA_STATEMENTS } from './schema'
+import { SCHEMA_STATEMENTS, MIGRATION_STATEMENTS } from './schema'
 
 // pg 连接池（计划书 §7.5/§8：启动校验连通性 + 自动建表，幂等可重跑）
 export function createPool(cfg: AppConfig): Pool {
@@ -28,12 +28,15 @@ function createPoolFrom(pg: PgConfig): Pool {
   })
 }
 
-/** 自动建表：全部 CREATE 语句在单事务内执行（幂等，可安全重跑） */
+/** 自动建表 + 单用户→多用户迁移：全部语句在单事务内执行（幂等，可安全重跑） */
 export async function ensureSchema(pool: Pool): Promise<void> {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     for (const sql of SCHEMA_STATEMENTS) {
+      await client.query(sql)
+    }
+    for (const sql of MIGRATION_STATEMENTS) {
       await client.query(sql)
     }
     await client.query('COMMIT')

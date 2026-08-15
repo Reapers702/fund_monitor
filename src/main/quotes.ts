@@ -28,8 +28,12 @@ export interface QuotesResult {
 export async function runQuotesCore(pool: Pool): Promise<QuotesResult> {
   const result: QuotesResult = { fundCount: 0, stockCount: 0, klineAdded: 0, estimates: [], errors: [] }
 
+  // 全局活跃基金：所有用户自选的并集（去重，多人收藏同一基金只抓一次，多用户 M9）
   const funds = await pool.query<{ fund_code: string; fund_name: string }>(
-    'SELECT fund_code, fund_name FROM fund_basic WHERE is_active = 1 ORDER BY fund_code'
+    `SELECT DISTINCT f.fund_code, f.fund_name
+     FROM user_fund uf JOIN fund_basic f ON f.fund_code = uf.fund_code
+     WHERE uf.is_active = 1
+     ORDER BY f.fund_code`
   )
   result.fundCount = funds.rows.length
   if (funds.rows.length === 0) return result
@@ -128,10 +132,13 @@ async function estimateOneFund(
   return null
 }
 
-/** 盘中高频估值采样：只对启用基金做 T1/T2/T3 估值入库（T3 需查持仓，频率由调度器控制） */
+/** 盘中高频估值采样：对全局活跃基金（所有用户自选并集，去重）做 T1/T2/T3 估值入库 */
 export async function sampleEstimatesCore(pool: Pool): Promise<{ sampled: number; errors: number }> {
   const funds = await pool.query<{ fund_code: string; fund_name: string }>(
-    'SELECT fund_code, fund_name FROM fund_basic WHERE is_active = 1 ORDER BY fund_code'
+    `SELECT DISTINCT f.fund_code, f.fund_name
+     FROM user_fund uf JOIN fund_basic f ON f.fund_code = uf.fund_code
+     WHERE uf.is_active = 1
+     ORDER BY f.fund_code`
   )
   let sampled = 0
   let errors = 0

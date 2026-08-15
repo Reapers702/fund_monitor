@@ -26,6 +26,8 @@ export interface AppConfig {
   analyzer: { minutes: string }
   fetch: { channel: 'node' | 'browser' | 'auto' }
   funds: string[]
+  // 当前激活用户（多用户 M9）：应用启动后从本字段恢复；见 src/main/user.ts
+  currentUserId: number
 }
 
 const DEFAULTS: AppConfig = {
@@ -39,7 +41,8 @@ const DEFAULTS: AppConfig = {
   },
   analyzer: { minutes: '35' },
   fetch: { channel: 'node' },
-  funds: []
+  funds: [],
+  currentUserId: 1
 }
 
 /** 应用专属配置文件路径：userData/config.json */

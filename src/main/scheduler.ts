@@ -29,9 +29,13 @@ export interface SchedulerState {
 let state: SchedulerState = { running: false, lastEstimateAt: 0, navTodayDone: false, adviceTodayDone: false, lastLog: '未启动' }
 let timer: NodeJS.Timeout | null = null
 
-/** 今天是否已确认当日净值（latestNavDate >= today） */
+/** 今天是否已确认当日净值（所有用户自选基金并集都出净值才算，多用户 M9） */
 async function navTodayConfirmed(pool: Pool): Promise<boolean> {
-  const funds = await pool.query<{ fund_code: string }>('SELECT fund_code FROM fund_basic WHERE is_active = 1')
+  const funds = await pool.query<{ fund_code: string }>(
+    `SELECT DISTINCT f.fund_code
+     FROM user_fund uf JOIN fund_basic f ON f.fund_code = uf.fund_code
+     WHERE uf.is_active = 1`
+  )
   if (funds.rows.length === 0) return true // 无自选基金视为完成
   for (const f of funds.rows) {
     const d = await latestNavDate(pool, f.fund_code)
@@ -40,9 +44,14 @@ async function navTodayConfirmed(pool: Pool): Promise<boolean> {
   return true
 }
 
-/** 净值增量：对启用基金串行 syncFund（详情+净值增量+持仓缺失补拉） */
+/** 净值增量：对全局活跃基金（所有用户自选并集，去重）串行 syncFund（详情+净值增量+持仓缺失补拉） */
 async function runNavDaily(pool: Pool): Promise<{ done: number; total: number }> {
-  const funds = await pool.query<{ fund_code: string }>('SELECT fund_code FROM fund_basic WHERE is_active = 1 ORDER BY fund_code')
+  const funds = await pool.query<{ fund_code: string }>(
+    `SELECT DISTINCT f.fund_code
+     FROM user_fund uf JOIN fund_basic f ON f.fund_code = uf.fund_code
+     WHERE uf.is_active = 1
+     ORDER BY f.fund_code`
+  )
   let done = 0
   for (const f of funds.rows) {
     try {

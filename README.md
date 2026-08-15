@@ -23,6 +23,7 @@
 - **我的持仓**：买卖录入/删除，移动加权平均成本与盈亏汇总，费率设置
 - **新闻流**：只读 `ai_fund.raw_news` 时间线，情绪色标 + LLM 主题标签 + 关键词筛选（60s 自动轮询）
 - **AI 分析**：DeepSeek 生成建议（写 `ds_advice`），非 hold 触发桌面通知
+- **多用户**：无密码按名字切换（顶栏显示当前用户，设置页管理/新建）；自选基金、持仓、费率、AI 建议（基于各自持仓）按用户隔离，基金基本信息/净值/估值/重仓股全局共享——多人收藏同一基金不重复抓取
 - **托盘常驻**：关闭窗口最小化到系统托盘，后台采集/AI 分析持续运行；托盘菜单可显示主窗口或退出；设置页可开关开机自启
 - **设置**：DeepSeek Key / 抓取频率 / 通道 / 开机自启写回 config.json
 - **估值说明**：设置后独立页面，说明 T1/T2/T3 三种估值手段的原理与精度，并列出每只自选基金当前的估值方式 + 最近 20 日"估值 vs 实际净值"误差统计
@@ -30,7 +31,8 @@
 ## 架构说明
 
 - **新闻不抓取**：财联社采集 + LLM 增强由另一套 24h 运行的程序完成，写入同一 PG 实例的 `ai_fund` 库 `raw_news` 表（含 `summary`/`sentiment`/`llm_tags` 字段），本应用仅通过 `config.aiFund` 只读连接消费。
-- **双库并存**：本应用数据在 `fund_monitor` 库（8 张表，启动自动建表幂等）；新闻在 `ai_fund` 库。两者通常同实例同凭证、仅库名不同。
+- **双库并存**：本应用数据在 `fund_monitor` 库（11 张表，启动自动建表幂等）；新闻在 `ai_fund` 库。两者通常同实例同凭证、仅库名不同。
+- **多用户数据面**：`app_user`（用户）+ `user_fund`（用户自选基金，含启用/停用）+ 用户级列（`fund_trade.user_id` / `ds_advice.user_id` / `fund_profile` 按 user_id）；基金数据（`fund_basic`/净值/估值/重仓股/行情）无用户维度全局共享。历史数据已迁移至默认用户 **guanxin**。当前用户持久化在 config.json `currentUserId`。
 - **盘中估值三级降级**：T1 按基金名称关键词匹配跟踪指数（INDEX_RULES 17 条）→ 指数实时涨跌幅；T2 行业/主题型基金匹配同主题 ETF（ETF_RULES 20 条，fundgz 页面估值接口已下线，用主题 ETF 替代）；T3 主动型基金（无规则命中）用最近季报重仓股实时涨跌按权重加权估算（误差大仅参考，界面标注"基于季报估算"）。全部写 `fund_estimate`（source 区分），详见"估值说明"页。
 - **行情多源降级**：个股/指数行情主 push2/push2his（东财），连接被拒或持续失败自动熔断 5 分钟后走腾讯 `qt.gtimg` / `web.ifzq` 降级源（`crawler/market.ts`）。
 - **后台调度器**：主窗口启动后常驻（`scheduler.ts`），按交易时段自动执行——盘中（9:30-11:30 / 13:00-15:00）每 `estimateIntervalSeconds` 做一轮估值采样；盘后（15:30 起）按 `navCheckMinutes` 轮询当日净值直至出现或 23:00；收盘后（`analyzer.minutes`，默认 15:35）自动跑全部基金 AI 分析并推送非 hold 通知。任务均带防重跑标记，非交易日自动跳过（交易日历三级降级，见 `scheduler/tradingCalendar.ts`）。
@@ -85,18 +87,21 @@ npm run build:win
 
 ## 数据库
 
-`fund_monitor` 库 8 张表（启动自动 `CREATE TABLE IF NOT EXISTS` 幂等建表）：
+`fund_monitor` 库 11 张表（启动自动 `CREATE TABLE IF NOT EXISTS` 幂等建表 + 单用户→多用户迁移）：
 
 | 表 | 用途 |
 |---|---|
-| `fund_basic` | 基金基础信息（名称/经理/托管/成立日） |
+| `app_user` | 用户（多用户 M9，默认 guanxin） |
+| `user_fund` | 用户自选基金（user_id + fund_code + is_active） |
+| `fund_basic` | 基金基础信息（名称/经理/托管/成立日，全局共享） |
 | `fund_nav_daily` | 每日净值（UNIQUE fund_code+trade_date 幂等） |
 | `fund_estimate` | 盘中估值采样（T1 跟踪指数 / T2 主题ETF / T3 重仓股加权，source 区分） |
+| `fund_estimate_diff` | 估值误差统计（盘中估值 vs 实际净值） |
 | `fund_holdings` | 季度重仓股（报告期+权重） |
 | `stock_daily` | 个股日线/实时行情 |
-| `ds_advice` | DeepSeek 建议留痕（含 response_raw） |
-| `fund_trade` | 持仓买卖流水 |
-| `fund_profile` | 费率配置 |
+| `ds_advice` | DeepSeek 建议留痕（含 response_raw；按 user_id 隔离） |
+| `fund_trade` | 持仓买卖流水（按 user_id 隔离） |
+| `fund_profile` | 费率配置（按 user_id） |
 
 新闻表 `raw_news` 位于 `ai_fund` 库（另一程序维护，本应用只读）。
 
@@ -158,7 +163,7 @@ npm run build:win    # NSIS 安装包
 - [x] **估值误差统计**：盘后净值确认时记录当日最后一次盘中估值与实际净值的差值（`fund_estimate_diff`），估值说明页展示最近 20 日各基金 T1/T2/T3 的平均绝对误差，量化 T3 可信度
 - [ ] **可选数据源**：雪球个股行情（需会话 cookie，隐藏窗口种 cookie 方案）等
 
-> 已完成：**法定节假日交易日历**（腾讯日K交易日 + 百度法定节假日 + 静态休市表三级降级，见 `scheduler/tradingCalendar.ts`）；**估值说明页**（T1/T2/T3 方法说明 + 各基金当前方式，见"估值说明"菜单）。
+> 已完成：**法定节假日交易日历**（腾讯日K交易日 + 百度法定节假日 + 静态休市表三级降级，见 `scheduler/tradingCalendar.ts`）；**估值说明页**（T1/T2/T3 方法说明 + 各基金当前方式，见"估值说明"菜单）；**多用户（M9）**（自选/持仓/建议按用户隔离，基金数据全局共享不重复抓取，历史数据归 guanxin）。
 
 ## 免责声明
 

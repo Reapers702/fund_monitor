@@ -245,12 +245,29 @@ interface EstimateDiffStat {
   latestNav: number | null
 }
 
+// ---------- 多用户（M9） ----------
+
+interface AppUserRow {
+  id: number
+  name: string
+  createdAt: string
+}
+
+interface CurrentUser {
+  id: number
+  name: string
+}
+
 // 渲染进程可用的业务 API（与 src/main/ipc.ts 的 handler 一一对应）
 interface FundApi {
   ping: () => Promise<string>
   getAppInfo: () => Promise<AppInfo>
   getAutoLaunch: () => Promise<boolean>
   setAutoLaunch: (enabled: boolean) => Promise<boolean>
+  userGetCurrent: () => Promise<CurrentUser>
+  userList: () => Promise<AppUserRow[]>
+  userCreate: (name: string) => Promise<CurrentUser>
+  userSwitch: (id: number) => Promise<void>
   fundsList: () => Promise<FundCard[]>
   fundsAdd: (code: string) => Promise<FundSyncResult>
   fundsToggle: (code: string, active: boolean) => Promise<void>

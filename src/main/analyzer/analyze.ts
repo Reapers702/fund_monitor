@@ -136,8 +136,9 @@ export interface AnalyzeContext {
   aiFundPool: Pool
 }
 
-/** 单基金 AI 分析主流程；返回 null 表示跳过（未配置 Key / 数据不足 / 解析失败） */
-export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: number | null = null): Promise<AnalyzeResult | null> {
+/** 单基金 AI 分析主流程；返回 null 表示跳过（未配置 Key / 数据不足 / 解析失败）。
+ *  userId：持仓成本按该用户计算（多用户 M9，建议基于各自持仓）；默认 1=guanxin */
+export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: number | null = null, userId = 1): Promise<AnalyzeResult | null> {
   const { pool, aiFundPool } = ctx
   if (!hasDeepseekKey()) {
     console.warn(`[analyze] ${code} 跳过：未配置 DeepSeek API Key`)
@@ -156,7 +157,7 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
   }
   const holdings = await latestHoldings(pool, code)
 
-  // 用户持仓：显式 cost 参数优先；否则从 fund_trade 移动加权计算（M7）
+  // 用户持仓：显式 cost 参数优先；否则从该用户 fund_trade 移动加权计算（M7/M9）
   let position: PositionSummary | null = null
   if (cost !== null) {
     position = {
@@ -172,7 +173,7 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
       pnlPct: null
     }
   } else {
-    const pos = await computePosition(pool, code)
+    const pos = await computePosition(pool, userId, code)
     position = pos.shares > 0 ? pos : null
     if (position) {
       console.log(`[analyze] ${code} 已接入持仓：${position.shares} 份，成本 ${position.avgCost?.toFixed(4)}，盈亏 ${position.floatingPnl?.toFixed(2)}`)
@@ -212,12 +213,12 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
   return parsed
 }
 
-/** 写 ds_advice（含原始响应留痕）；返回是否新插入 */
-export async function saveAdvice(pool: Pool, code: string, r: AnalyzeResult, tradeDate: string): Promise<boolean> {
+/** 写 ds_advice（含原始响应留痕）；返回是否新插入。userId：建议归属用户（多用户 M9） */
+export async function saveAdvice(pool: Pool, code: string, r: AnalyzeResult, tradeDate: string, userId = 1): Promise<boolean> {
   const res = await pool.query(
-    `INSERT INTO ds_advice (fund_code, trade_date, action, reason, confidence, response_raw, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, now())`,
-    [code, tradeDate, r.action, r.reason, r.confidence, JSON.stringify({ raw: r.raw })]
+    `INSERT INTO ds_advice (fund_code, trade_date, action, reason, confidence, response_raw, user_id, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+    [code, tradeDate, r.action, r.reason, r.confidence, JSON.stringify({ raw: r.raw }), userId]
   )
   return (res.rowCount ?? 0) > 0
 }

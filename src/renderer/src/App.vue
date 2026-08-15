@@ -1,10 +1,19 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { NConfigProvider, NMessageProvider, NLayout, NLayoutHeader, NLayoutContent, NMenu, NTag, zhCN, dateZhCN, darkTheme } from 'naive-ui'
+import { NConfigProvider, NMessageProvider, NLayout, NLayoutHeader, NLayoutContent, NMenu, NTag, NAvatar, zhCN, dateZhCN, darkTheme } from 'naive-ui'
 
 const route = useRoute()
 const dark = ref(false)
+const currentUser = ref<CurrentUser | null>(null)
+
+onMounted(async () => {
+  try {
+    currentUser.value = await window.api.userGetCurrent()
+  } catch {
+    // 启动建表未完成时忽略，稍后页面刷新会带上
+  }
+})
 
 const activeKey = computed(() => {
   if (route.path.startsWith('/fund')) return 'dashboard'
@@ -48,6 +57,10 @@ function onMenuSelect(key: string): void {
             :value="activeKey"
             @update:value="onMenuSelect"
           />
+          <n-tag v-if="currentUser" class="user-tag" size="small" :bordered="false">
+            <n-avatar round :size="18" class="user-avatar">{{ currentUser.name.slice(0, 1) }}</n-avatar>
+            {{ currentUser.name }}
+          </n-tag>
         </n-layout-header>
 
         <n-layout-content class="app-content" :native-scrollbar="false">
@@ -94,6 +107,19 @@ function onMenuSelect(key: string): void {
 
 .app-menu :deep(.n-menu-menu-content) {
   justify-content: flex-end;
+}
+
+.user-tag {
+  margin-left: 12px;
+  color: var(--text-color-2);
+}
+
+.user-avatar {
+  margin-right: 4px;
+  vertical-align: -4px;
+  color: #fff;
+  background: #18a058;
+  font-size: 12px;
 }
 
 .app-content {

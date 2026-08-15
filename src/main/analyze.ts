@@ -25,10 +25,12 @@ export interface AnalyzeAllResult {
   items: AnalyzeItemResult[]
 }
 
-/** 对一只基金执行分析并写库（含通知）；503/5xx 服务繁忙按指数退避重试最多 3 次 */
+/** 对一只基金执行分析并写库（含通知）；503/5xx 服务繁忙按指数退避重试最多 3 次。
+ *  userId：建议归属该用户，持仓成本按该用户计算（多用户 M9） */
 async function analyzeOne(
   pool: Pool,
   aiFundPool: Pool,
+  userId: number,
   code: string,
   name: string
 ): Promise<{ done: boolean; notified: boolean; action?: string; confidence?: number; reason?: string }> {
@@ -36,9 +38,9 @@ async function analyzeOne(
   let lastErr: unknown
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const r = await analyzeFund({ pool, aiFundPool }, code, null)
+      const r = await analyzeFund({ pool, aiFundPool }, code, null, userId)
       if (!r) return { done: false, notified: false }
-      await saveAdvice(pool, code, r, todayStr())
+      await saveAdvice(pool, code, r, todayStr(), userId)
       if (r.action !== 'hold') {
         notifyAdvice(name, code, r.action, r.confidence, r.reason)
         return { done: true, notified: true, action: r.action, confidence: r.confidence, reason: r.reason }
@@ -61,25 +63,38 @@ async function analyzeOne(
   return { done: false, notified: false }
 }
 
-/** 核心：串行分析全部启用基金（避免打爆中转站限流）。不负责连接池生命周期。 */
+/** 核心：串行分析所有用户各自的自选基金（建议基于各用户持仓，多用户 M9）。不负责连接池生命周期。 */
 export async function runAnalyzeAllCore(pool: Pool, aiFundPool: Pool): Promise<AnalyzeAllResult> {
-  const funds = await pool.query<{ fund_code: string; fund_name: string }>(
-    'SELECT fund_code, fund_name FROM fund_basic WHERE is_active = 1 ORDER BY fund_code'
+  const users = await pool.query<{ id: number }>('SELECT id FROM app_user ORDER BY id')
+  const funds = await pool.query<{ user_id: number; fund_code: string; fund_name: string }>(
+    `SELECT uf.user_id, f.fund_code, f.fund_name
+     FROM user_fund uf JOIN fund_basic f ON f.fund_code = uf.fund_code
+     WHERE uf.is_active = 1
+     ORDER BY uf.user_id, f.fund_code`
   )
-  const result: AnalyzeAllResult = { total: funds.rows.length, done: 0, notified: 0, items: [] }
+  const byUser = new Map<number, { fund_code: string; fund_name: string }[]>()
+  for (const row of funds.rows) {
+    const arr = byUser.get(row.user_id) ?? []
+    arr.push({ fund_code: row.fund_code, fund_name: row.fund_name })
+    byUser.set(row.user_id, arr)
+  }
 
-  for (const f of funds.rows) {
-    const out = await analyzeOne(pool, aiFundPool, f.fund_code, f.fund_name)
-    if (out.done) result.done++
-    if (out.notified) result.notified++
-    result.items.push({ code: f.fund_code, name: f.fund_name, ...out })
+  const result: AnalyzeAllResult = { total: 0, done: 0, notified: 0, items: [] }
+  for (const u of users.rows) {
+    for (const f of byUser.get(u.id) ?? []) {
+      result.total++
+      const out = await analyzeOne(pool, aiFundPool, u.id, f.fund_code, f.fund_name)
+      if (out.done) result.done++
+      if (out.notified) result.notified++
+      result.items.push({ code: f.fund_code, name: f.fund_name, ...out })
+    }
   }
   return result
 }
 
-/** 单只基金核心：供 --analyze <code> 使用，返回结构化结果 */
+/** 单只基金核心：供 --analyze <code> 使用（默认归 guanxin 用户），返回结构化结果 */
 export async function runAnalyzeOneCore(pool: Pool, aiFundPool: Pool, code: string, name: string): Promise<AnalyzeItemResult> {
-  const out = await analyzeOne(pool, aiFundPool, code, name)
+  const out = await analyzeOne(pool, aiFundPool, 1, code, name)
   return { code, name, ...out }
 }
 

@@ -9,7 +9,10 @@ import { runQuotes } from './quotes'
 import { runNews } from './news'
 import { runAnalyzeAll, runAnalyzeOne } from './analyze'
 import { startScheduler, stopScheduler } from './scheduler'
-import { initLogger, logInfo } from './logger'
+import { initLogger, logInfo, logWarn } from './logger'
+import { initUser, ensureDefaultUser } from './user'
+import { loadConfig } from './config'
+import { createPool, ensureSchema } from './storage/db'
 
 function createWindow(): BrowserWindow {
   // 主窗口（渲染进程 UI；爬虫走主进程 Node 通道 + 隐藏窗口，不依赖此窗口）
@@ -231,6 +234,19 @@ if (process.argv.includes('--check')) {
     // 文件日志（userData/logs，按日滚动）
     initLogger()
     logInfo(`应用启动（版本 ${app.getVersion()}）`)
+    // 恢复上次使用的用户（多用户 M9）
+    initUser()
+    // 启动即建表 + 确保默认用户 guanxin 存在（后续 IPC 依赖表结构）
+    ;(async () => {
+      try {
+        const pool = createPool(loadConfig())
+        await ensureSchema(pool)
+        await ensureDefaultUser(pool)
+        await pool.end().catch(() => {})
+      } catch (e) {
+        logWarn(`[startup] 建表/默认用户失败（后续 IPC 会重试）: ${(e as Error).message}`)
+      }
+    })()
 
     // Default open or close DevTools by F12 in development
     // and ignore CommandOrControl + R in production.

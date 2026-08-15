@@ -60,7 +60,7 @@ export function computePositionFromTrades(trades: TradeLike[]): { shares: number
   return { shares, avgCost: cost, realizedPnl }
 }
 
-export async function listTrades(pool: Pool, fundCode?: string): Promise<TradeRow[]> {
+export async function listTrades(pool: Pool, userId: number, fundCode?: string): Promise<TradeRow[]> {
   const r = await pool.query<{
     id: number
     fund_code: string
@@ -73,9 +73,9 @@ export async function listTrades(pool: Pool, fundCode?: string): Promise<TradeRo
   }>(
     `SELECT id, fund_code, trade_type, shares, price, fee, trade_date, note
      FROM fund_trade
-     ${fundCode ? 'WHERE fund_code = $1' : ''}
+     WHERE user_id = $1 ${fundCode ? 'AND fund_code = $2' : ''}
      ORDER BY trade_date, id`,
-    fundCode ? [fundCode] : []
+    fundCode ? [userId, fundCode] : [userId]
   )
   return r.rows.map((x) => ({
     id: x.id,
@@ -90,8 +90,8 @@ export async function listTrades(pool: Pool, fundCode?: string): Promise<TradeRo
 }
 
 /** 移动加权平均持仓汇总（无交易则返回 null 份额为 0） */
-export async function computePosition(pool: Pool, fundCode: string): Promise<PositionSummary> {
-  const trades = await listTrades(pool, fundCode)
+export async function computePosition(pool: Pool, userId: number, fundCode: string): Promise<PositionSummary> {
+  const trades = await listTrades(pool, userId, fundCode)
   const { shares, avgCost: cost, realizedPnl } = computePositionFromTrades(
     trades.map((t) => ({ tradeType: t.tradeType, shares: t.shares, price: t.price, fee: t.fee }))
   )
@@ -122,14 +122,15 @@ export async function computePosition(pool: Pool, fundCode: string): Promise<Pos
   }
 }
 
-/** 全部有交易的基金持仓汇总 */
-export async function listPositions(pool: Pool): Promise<PositionSummary[]> {
+/** 当前用户全部有交易的基金持仓汇总 */
+export async function listPositions(pool: Pool, userId: number): Promise<PositionSummary[]> {
   const r = await pool.query<{ fund_code: string }>(
-    `SELECT DISTINCT fund_code FROM fund_trade ORDER BY fund_code`
+    `SELECT DISTINCT fund_code FROM fund_trade WHERE user_id = $1 ORDER BY fund_code`,
+    [userId]
   )
   const out: PositionSummary[] = []
   for (const row of r.rows) {
-    out.push(await computePosition(pool, row.fund_code))
+    out.push(await computePosition(pool, userId, row.fund_code))
   }
   return out
 }
@@ -137,43 +138,45 @@ export async function listPositions(pool: Pool): Promise<PositionSummary[]> {
 /** 录入一笔交易（买入/卖出） */
 export async function addTrade(
   pool: Pool,
+  userId: number,
   t: { fundCode: string; tradeType: 'buy' | 'sell'; shares: number; price: number; fee?: number; tradeDate: string; note?: string | null }
 ): Promise<number> {
   const res = await pool.query(
-    `INSERT INTO fund_trade (fund_code, trade_type, shares, price, fee, trade_date, note)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO fund_trade (user_id, fund_code, trade_type, shares, price, fee, trade_date, note)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING id`,
-    [t.fundCode, t.tradeType, t.shares, t.price, t.fee ?? 0, t.tradeDate, t.note ?? null]
+    [userId, t.fundCode, t.tradeType, t.shares, t.price, t.fee ?? 0, t.tradeDate, t.note ?? null]
   )
   return res.rows[0].id as number
 }
 
-/** 删除一笔交易（按 id） */
-export async function deleteTrade(pool: Pool, id: number): Promise<boolean> {
-  const res = await pool.query('DELETE FROM fund_trade WHERE id = $1', [id])
+/** 删除一笔交易（按 id，限当前用户） */
+export async function deleteTrade(pool: Pool, userId: number, id: number): Promise<boolean> {
+  const res = await pool.query('DELETE FROM fund_trade WHERE id = $1 AND user_id = $2', [id, userId])
   return (res.rowCount ?? 0) > 0
 }
 
-// ---------- fund_profile（费率） ----------
+// ---------- fund_profile（费率，按用户） ----------
 
 export interface FundProfile {
   buyFeePct: number
   sellFeePct: number
 }
 
-export async function getProfile(pool: Pool): Promise<FundProfile> {
+export async function getProfile(pool: Pool, userId: number): Promise<FundProfile> {
   const r = await pool.query<{ buy_fee_pct: string; sell_fee_pct: string }>(
-    `SELECT buy_fee_pct, sell_fee_pct FROM fund_profile WHERE id = 1`
+    `SELECT buy_fee_pct, sell_fee_pct FROM fund_profile WHERE user_id = $1`,
+    [userId]
   )
   if (r.rows.length === 0) return { buyFeePct: 0, sellFeePct: 0 }
   return { buyFeePct: Number(r.rows[0].buy_fee_pct), sellFeePct: Number(r.rows[0].sell_fee_pct) }
 }
 
-export async function saveProfile(pool: Pool, p: FundProfile): Promise<void> {
+export async function saveProfile(pool: Pool, userId: number, p: FundProfile): Promise<void> {
   await pool.query(
-    `INSERT INTO fund_profile (id, buy_fee_pct, sell_fee_pct) VALUES (1, $1, $2)
-     ON CONFLICT (id) DO UPDATE SET buy_fee_pct = $1, sell_fee_pct = $2`,
-    [p.buyFeePct, p.sellFeePct]
+    `INSERT INTO fund_profile (user_id, buy_fee_pct, sell_fee_pct) VALUES ($1, $2, $3)
+     ON CONFLICT (user_id) DO UPDATE SET buy_fee_pct = $2, sell_fee_pct = $3`,
+    [userId, p.buyFeePct, p.sellFeePct]
   )
 }
 
