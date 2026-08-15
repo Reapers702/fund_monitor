@@ -24,8 +24,14 @@ describe('isTradingDayStatic（静态交易日判断）', () => {
   })
 
   it('节假日（2026 春节）非交易日', () => {
-    expect(isTradingDayStatic(new Date(2026, 1, 17))).toBe(false) // 2026-02-17 春节（周二）
-    expect(isTradingDayStatic(new Date(2026, 1, 18))).toBe(false) // 2026-02-18
+    expect(isTradingDayStatic(new Date(2026, 1, 15))).toBe(false) // 2026-02-15 春节假期
+    expect(isTradingDayStatic(new Date(2026, 1, 17))).toBe(false) // 2026-02-17
+    expect(isTradingDayStatic(new Date(2026, 1, 23))).toBe(false) // 2026-02-23 春节最后一天（调休）
+  })
+
+  it('2026 劳动节 1-5 非交易日', () => {
+    expect(isTradingDayStatic(new Date(2026, 4, 1))).toBe(false) // 2026-05-01
+    expect(isTradingDayStatic(new Date(2026, 4, 5))).toBe(false) // 2026-05-05
   })
 
   it('2027 节假日非交易日', () => {
@@ -34,5 +40,6 @@ describe('isTradingDayStatic（静态交易日判断）', () => {
 
   it('节假日相邻工作日为交易日（非长假）', () => {
     expect(isTradingDayStatic(new Date(2026, 0, 5))).toBe(true) // 2026-01-05 元旦后周一
+    expect(isTradingDayStatic(new Date(2026, 1, 24))).toBe(true) // 2026-02-24 春节后恢复
   })
 })

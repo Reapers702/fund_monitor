@@ -123,23 +123,27 @@ if (process.argv.includes('--check')) {
     }
   })
 } else if (process.argv.includes('--calendar-test')) {
-  // 开发辅助：electron . --calendar-test 验证腾讯交易日历判断
+  // 开发辅助：electron . --calendar-test 验证交易日历（腾讯/百度/静态表三级降级）
   app.whenReady().then(async () => {
     try {
       const { isTradingDay, isTradingDayStatic } = await import('./scheduler/tradingCalendar')
+      // 腾讯列表范围内（当前约 2025-10 ~ 2026-08）→ 走腾讯层
+      // 超范围（2027 等）→ 降级百度节假日层（2027 未公布则落静态表）
       const cases: [string, string][] = [
-        ['2026-08-14', '周五'],
-        ['2026-08-15', '周六'],
-        ['2026-01-01', '元旦'],
-        ['2026-02-17', '春节(2/17)'],
-        ['2026-02-16', '春节假期'],
-        ['2026-02-23', '春节后周一']
+        ['2026-08-14', '周五(腾讯层)'],
+        ['2026-08-15', '周六(腾讯层)'],
+        ['2026-01-01', '元旦(百度层? 超腾讯范围)'],
+        ['2026-02-17', '春节(超腾讯范围)'],
+        ['2026-02-23', '春节调休(超腾讯范围)'],
+        ['2026-02-24', '春节后恢复(超腾讯范围)'],
+        ['2026-05-05', '劳动节最后一天(超腾讯范围)'],
+        ['2027-10-01', '2027国庆(百度未公布→静态表)']
       ]
       for (const [ds, label] of cases) {
         const d = new Date(ds + 'T00:00:00')
         const net = await isTradingDay(d)
         const st = isTradingDayStatic(d)
-        console.log(`[calendar-test] ${ds}(${label}) 腾讯接口=${net ? '交易日' : '休市'} | 静态表=${st ? '交易日' : '休市'}`)
+        console.log(`[calendar-test] ${ds}(${label}) 判断=${net ? '交易日' : '休市'} | 静态表=${st ? '交易日' : '休市'}`)
       }
       app.exit(0)
     } catch (e) {
