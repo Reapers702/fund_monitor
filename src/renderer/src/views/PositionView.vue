@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, h } from 'vue'
 import {
   NCard, NTable, NTag, NButton, NInput, NInputNumber, NSelect, NDatePicker,
   NSpace, NEmpty, NForm, NFormItem, NAlert, useMessage
@@ -13,7 +13,17 @@ const profile = ref<FundProfile>({ buyFeePct: 0, sellFeePct: 0 })
 
 // 录入表单
 const showForm = ref(false)
-const formFunds = ref<{ label: string; value: string }[]>([])
+const formFunds = ref<{ label: string; value: string; name: string; code: string }[]>([])
+
+/** 基金下拉选项渲染：名称（大）+ 代码（小灰副行），避免超长名称被截断 */
+function renderFundLabel(option: { label: string; name?: string; code?: string }) {
+  const name = option.name ?? option.label
+  const code = option.code ?? ''
+  return h('div', { class: 'fund-option' }, [
+    h('div', { class: 'fund-option-name' }, name),
+    code ? h('div', { class: 'fund-option-code' }, code) : null
+  ])
+}
 const form = ref<TradeInput & { rawDate: number | null }>({
   fundCode: '',
   tradeType: 'buy',
@@ -33,7 +43,13 @@ async function load(): Promise<void> {
     const funds = await window.api.fundsList()
     formFunds.value = funds
       .filter((f) => f.isActive === 1)
-      .map((f) => ({ label: `${f.name}（${f.code}）`, value: f.code }))
+      .map((f) => ({
+        label: `${f.name}（${f.code}）`,
+        value: f.code,
+        // 供 renderLabel 使用
+        name: f.name,
+        code: f.code
+      }))
     // 逐基金加载交易明细（并挂载当前汇总）
     tradesByFund.value = {}
     for (const p of positions.value) {
@@ -188,7 +204,16 @@ onMounted(load)
       <div v-if="showForm" class="trade-form">
         <n-form label-placement="left" label-width="90" :show-feedback="false" class="trade-form-inner">
           <n-form-item label="基金">
-            <n-select v-model:value="form.fundCode" :options="formFunds" placeholder="选择要录入的基金" class="f-field" />
+            <n-select
+              v-model:value="form.fundCode"
+              :options="formFunds"
+              placeholder="选择要录入的基金"
+              filterable
+              clearable
+              :render-label="renderFundLabel"
+              popup-class="fund-select-popup"
+              class="f-field f-field-fund"
+            />
           </n-form-item>
           <n-form-item label="操作">
             <n-select
@@ -332,6 +357,30 @@ onMounted(load)
 
 .f-field {
   width: 220px;
+}
+
+/* 基金下拉触发框加宽，完整显示基金名称 */
+.f-field-fund {
+  width: 320px;
+}
+
+/* 下拉面板宽度（两行布局：名称 + 代码） */
+:global(.fund-select-popup) {
+  width: 340px !important;
+}
+
+.fund-option-name {
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fund-option-code {
+  font-size: 11px;
+  color: var(--text-color-3);
+  margin-top: 2px;
 }
 
 .trade-form-foot {
