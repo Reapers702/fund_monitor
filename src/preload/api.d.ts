@@ -45,6 +45,9 @@ interface FundCard {
   estTime: string | null
   estSource: string | null
   holdingsDate: string | null
+  adviceAction: string | null
+  adviceConfidence: number | null
+  adviceDate: string | null
 }
 
 interface FundSyncResult {

@@ -122,6 +122,17 @@ function pctClass(v: number | null): string {
   return v > 0 ? 'up' : v < 0 ? 'down' : 'muted'
 }
 
+/** AI 建议 → 标签（A股习惯：加仓红 / 减仓绿 / 持有蓝） */
+function adviceTag(action: string): { color: { text: string; border: string; color: string }; text: string } {
+  if (action === 'add') {
+    return { text: '建议加仓', color: { text: '#fff', border: '#e5484d', color: '#e5484d' } }
+  }
+  if (action === 'reduce') {
+    return { text: '建议减仓', color: { text: '#fff', border: '#1f9d55', color: '#1f9d55' } }
+  }
+  return { text: '建议持有', color: { text: '#fff', border: '#2080f0', color: '#2080f0' } }
+}
+
 let schedulerTimer: number | null = null
 
 onMounted(() => {
@@ -208,6 +219,14 @@ onBeforeUnmount(() => {
                 {{ f.estSource === 'tracking_index' ? 'T1 跟踪指数' : f.estSource === 'theme_etf' ? 'T2 主题ETF' : '无估值' }}
               </div>
             </div>
+          </div>
+          <div class="advice-bar">
+            <n-tag v-if="f.adviceAction" size="small" :color="adviceTag(f.adviceAction).color" :bordered="false" class="advice-tag">
+              {{ adviceTag(f.adviceAction).text }}
+            </n-tag>
+            <span v-if="f.adviceDate" class="advice-date">建议日期 {{ f.adviceDate }}</span>
+            <span v-if="f.adviceConfidence !== null" class="advice-conf">置信 {{ f.adviceConfidence }}%</span>
+            <span v-if="!f.adviceAction" class="advice-none">暂无 AI 建议</span>
           </div>
           <div class="card-foot">
             <n-tag v-if="f.isActive !== 1" size="tiny" type="default">已停用</n-tag>
@@ -325,6 +344,30 @@ onBeforeUnmount(() => {
 }
 
 .muted {
+  color: var(--text-color-3);
+}
+
+.advice-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-color, rgba(128, 128, 128, 0.2));
+}
+
+.advice-tag {
+  font-weight: 600;
+}
+
+.advice-date,
+.advice-conf {
+  font-size: 12px;
+  color: var(--text-color-3);
+}
+
+.advice-none {
+  font-size: 12px;
   color: var(--text-color-3);
 }
 

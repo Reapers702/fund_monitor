@@ -15,6 +15,9 @@ export interface FundCard {
   estTime: string | null
   estSource: string | null // tracking_index / theme_etf
   holdingsDate: string | null
+  adviceAction: string | null // 最新 AI 建议：add / reduce / hold
+  adviceConfidence: number | null
+  adviceDate: string | null // 建议交易日 YYYY-MM-DD
 }
 
 export async function listFunds(pool: Pool): Promise<FundCard[]> {
@@ -26,15 +29,24 @@ export async function listFunds(pool: Pool): Promise<FundCard[]> {
     dwjz: string | null
     jzzzl: string | null
     holdings_date: string | null
+    advice_action: string | null
+    advice_confidence: string | null
+    advice_date: string | null
   }>(
     `SELECT f.fund_code, f.fund_name, f.is_active,
             n.trade_date, n.dwjz, n.jzzzl,
-            (SELECT to_char(max(report_date), 'YYYY-MM-DD') FROM fund_holdings h WHERE h.fund_code = f.fund_code) AS holdings_date
+            (SELECT to_char(max(report_date), 'YYYY-MM-DD') FROM fund_holdings h WHERE h.fund_code = f.fund_code) AS holdings_date,
+            a.action AS advice_action, a.confidence AS advice_confidence,
+            to_char(a.trade_date, 'YYYY-MM-DD') AS advice_date
      FROM fund_basic f
      LEFT JOIN LATERAL (
        SELECT trade_date, dwjz, jzzzl FROM fund_nav_daily
        WHERE fund_code = f.fund_code ORDER BY trade_date DESC LIMIT 1
      ) n ON true
+     LEFT JOIN LATERAL (
+       SELECT action, confidence, trade_date FROM ds_advice
+       WHERE fund_code = f.fund_code ORDER BY trade_date DESC, id DESC LIMIT 1
+     ) a ON true
      ORDER BY f.is_active DESC, f.fund_code`
   )
   // 估值单独查（最新一次采样；盘中高频，无需按服务器日期过滤——采样本身就在交易时段）
@@ -55,7 +67,10 @@ export async function listFunds(pool: Pool): Promise<FundCard[]> {
     latestNavDate: row.trade_date ? String(row.trade_date).slice(0, 10) : null,
     navChangePct: row.jzzzl === null ? null : Number(row.jzzzl),
     ...(estMap.get(row.fund_code) ?? { estPct: null, estTime: null, estSource: null }),
-    holdingsDate: row.holdings_date
+    holdingsDate: row.holdings_date,
+    adviceAction: row.advice_action,
+    adviceConfidence: row.advice_confidence === null ? null : Number(row.advice_confidence),
+    adviceDate: row.advice_date
   }))
 }
 
