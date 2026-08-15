@@ -9,6 +9,7 @@ import { runQuotes } from './quotes'
 import { runNews } from './news'
 import { runAnalyzeAll, runAnalyzeOne } from './analyze'
 import { startScheduler, stopScheduler } from './scheduler'
+import { initLogger, logInfo } from './logger'
 
 function createWindow(): BrowserWindow {
   // 主窗口（渲染进程 UI；爬虫走主进程 Node 通道 + 隐藏窗口，不依赖此窗口）
@@ -176,6 +177,10 @@ if (process.argv.includes('--check')) {
   app.whenReady().then(() => {
     // Set app user model id for windows
     electronApp.setAppUserModelId('top.reapers.fundmonitor')
+
+    // 文件日志（userData/logs，按日滚动）
+    initLogger()
+    logInfo(`应用启动（版本 ${app.getVersion()}）`)
 
     // Default open or close DevTools by F12 in development
     // and ignore CommandOrControl + R in production.

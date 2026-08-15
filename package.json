@@ -25,7 +25,8 @@
     "quotes": "npm run build && electron . --quotes",
     "news": "npm run build && electron . --news",
     "analyze": "npm run build && electron . --analyze",
-    "analyze-all": "npm run build && electron . --analyze-all"
+    "analyze-all": "npm run build && electron . --analyze-all",
+    "test": "vitest run"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
@@ -50,6 +51,7 @@
     "prettier": "^3.7.4",
     "typescript": "^5.9.3",
     "vite": "^7.2.6",
+    "vitest": "^4.1.10",
     "vue": "^3.5.25",
     "vue-eslint-parser": "^10.2.0",
     "vue-tsc": "^3.1.6"

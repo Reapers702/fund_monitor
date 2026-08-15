@@ -1,15 +1,18 @@
 // AI 分析（计划书 §7.3）：对单只基金生成 加仓/减仓/持有 建议
-// 输入：近120日净值 + 今日涨跌 + 重仓股近10日表现 + 相关新闻（按重仓股/基金名过滤 ai_fund.raw_news）
+// 输入：近120日净值 + 今日涨跌 + 重仓股近10日表现 + 相关新闻（按重仓股/基金名过滤 ai_fund.raw_news）+ 用户持仓（份额/成本/盈亏）
 // 输出：固定 JSON { action, confidence, reason }，写 ds_advice 保留 response_raw；action != hold 触发桌面通知
 import type { Pool } from 'pg'
 import { chatComplete, hasDeepseekKey, DeepseekError } from '../llm/deepseek'
 import { navSeries, latestHoldings, fundBasic } from '../storage/queries'
 import { newsByTags } from '../news/reader'
+import { computePosition } from '../position/position'
+import type { PositionSummary } from '../position/position'
 import { createAiFundPool } from '../storage/db'
+import { parseAdvice } from './parse'
 
 export interface AnalyzeInput {
   code: string
-  /** 可选：显式提供持仓成本（M7 接入后由持仓管理提供；未提供则只给净值+重仓股信号） */
+  /** 可选：显式覆盖持仓成本（正常情况下由 fund_trade 自动计算） */
   cost?: number | null
 }
 
@@ -27,7 +30,14 @@ const SYSTEM_PROMPT = `你是基金投资分析助手。基于给定的场外基
 3. JSON 格式严格为：{"action":"add|reduce|hold","confidence":0~100,"reason":"中文理由，150字以内"}。
 4. action 含义：add=当前值得加仓；reduce=当前值得减仓/止盈；hold=继续持有观望。`
 
-function buildUserPrompt(fundName: string, code: string, nav: Awaited<ReturnType<typeof navSeries>>, holdings: Awaited<ReturnType<typeof latestHoldings>>, news: { title: string | null; summary: string | null; sentiment: string | null; llmTags: string[] }[], cost: number | null): string {
+function buildUserPrompt(
+  fundName: string,
+  code: string,
+  nav: Awaited<ReturnType<typeof navSeries>>,
+  holdings: Awaited<ReturnType<typeof latestHoldings>>,
+  news: { title: string | null; summary: string | null; sentiment: string | null; llmTags: string[] }[],
+  position: PositionSummary | null
+): string {
   const latestNav = nav[nav.length - 1]
   const firstNav = nav[0]
   const periodPct = firstNav && firstNav.nav > 0 ? (((latestNav.nav - firstNav.nav) / firstNav.nav) * 100).toFixed(2) : null
@@ -44,10 +54,18 @@ function buildUserPrompt(fundName: string, code: string, nav: Awaited<ReturnType
     .map((n) => `- [${n.sentiment ?? '未知情绪'}] ${n.title ?? ''} ${n.summary ? '| ' + n.summary.slice(0, 100) : ''}`)
     .join('\n')
 
+  // 用户持仓（M7 录入 fund_trade 计算而来；无持仓则提示）
+  const posLines =
+    position && position.shares > 0
+      ? `持有 ${position.shares} 份，移动加权平均成本 ${position.avgCost?.toFixed(4)}，
+最新净值 ${position.latestNav?.toFixed(4) ?? '--'}，浮动盈亏 ${position.floatingPnl?.toFixed(2) ?? '--'}（收益率 ${position.pnlPct?.toFixed(2) ?? '--'}%）
+请结合持仓盈亏给出建议：深套时是否止损/补仓、盈利时是否止盈。`
+      : '（未录入持仓，仅基于净值与重仓股判断）'
+
   return `基金：${fundName}（${code}）
 净值样本数：${nav.length} 条；区间涨跌：${periodPct ?? '--'}%（近${nav.length}个交易日，归一化起点）
 最新净值：${latestNav.nav.toFixed(4)}（${latestNav.date}），当日涨跌 ${latestNav.changePct === null ? '--' : latestNav.changePct.toFixed(2)}%
-${cost !== null ? `用户持仓成本：${cost.toFixed(4)}（用于结合成本判断盈亏与建议）` : '（未提供用户持仓成本）'}
+${posLines}
 
 近 30 日净值：
 ${navLines}
@@ -61,22 +79,7 @@ ${newsLines || '（无相关新闻）'}
 请给出 加仓/减仓/持有 建议。`
 }
 
-/** 解析 LLM 输出：提取首个 JSON 对象，校验字段合法性 */
-export function parseAdvice(raw: string): AnalyzeResult | null {
-  const m = raw.match(/\{[\s\S]*\}/)
-  if (!m) return null
-  try {
-    const obj = JSON.parse(m[0]) as { action?: unknown; confidence?: unknown; reason?: unknown }
-    const action = String(obj.action ?? '').toLowerCase()
-    if (!['add', 'reduce', 'hold'].includes(action)) return null
-    const confidence = Number(obj.confidence)
-    const reason = String(obj.reason ?? '').trim()
-    if (Number.isNaN(confidence) || !reason) return null
-    return { action: action as 'add' | 'reduce' | 'hold', confidence: Math.max(0, Math.min(100, confidence)), reason, raw }
-  } catch {
-    return null
-  }
-}
+// parseAdvice 在 ./parse（纯函数独立模块，便于单测）
 
 export interface AnalyzeContext {
   pool: Pool
@@ -103,12 +106,35 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
   }
   const holdings = await latestHoldings(pool, code)
 
+  // 用户持仓：显式 cost 参数优先；否则从 fund_trade 移动加权计算（M7）
+  let position: PositionSummary | null = null
+  if (cost !== null) {
+    position = {
+      fundCode: code,
+      fundName: basic.name,
+      shares: 0,
+      avgCost: cost,
+      totalCost: 0,
+      realizedPnl: 0,
+      latestNav: nav[nav.length - 1]?.nav ?? null,
+      marketValue: null,
+      floatingPnl: null,
+      pnlPct: null
+    }
+  } else {
+    const pos = await computePosition(pool, code)
+    position = pos.shares > 0 ? pos : null
+    if (position) {
+      console.log(`[analyze] ${code} 已接入持仓：${position.shares} 份，成本 ${position.avgCost?.toFixed(4)}，盈亏 ${position.floatingPnl?.toFixed(2)}`)
+    }
+  }
+
   // 相关新闻：用基金名关键词 + 前 8 个重仓股名过滤 ai_fund.raw_news
   const stockNames = holdings.rows.map((h) => h.stockName).filter((s): s is string => Boolean(s)).slice(0, 8)
   const fundKeywords = [basic.name.replace(/[联接A-C0-9]+$/g, '').slice(0, 6)]
   const news = await newsByTags(aiFundPool, [...fundKeywords, ...stockNames], 10)
 
-  const userPrompt = buildUserPrompt(basic.name, code, nav, holdings, news, cost)
+  const userPrompt = buildUserPrompt(basic.name, code, nav, holdings, news, position)
   const raw = await chatComplete(
     [
       { role: 'system', content: SYSTEM_PROMPT },

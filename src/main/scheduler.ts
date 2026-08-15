@@ -2,14 +2,17 @@
 //  盘中（9:30-11:30, 13:00-15:00）：每 estimateIntervalSeconds 估值采样（T1/T2）
 //  盘后（15:30 起）：净值增量（每 navCheckMinutes 轮询至当日净值出现或 23:00）
 //  收盘后（analyzer.minutes，默认 35 → 15:35）：全部基金 AI 分析 + 非 hold 通知
-// 所有任务均带防重跑标记；交易日判断仅周末（节假日不处理，属低频个人工具合理取舍）
+// 所有任务均带防重跑标记；交易日判断见 scheduler/time.ts
 import { loadConfig } from './config'
 import { createPool, createAiFundPool, ensureSchema } from './storage/db'
 import { sampleEstimatesCore } from './quotes'
 import { runAnalyzeAllCore } from './analyze'
 import { syncFund } from './fund'
 import { latestNavDate } from './storage/fundRepo'
+import { cleanupOldEstimates } from './storage/estimateRepo'
 import { todayStr } from './quotes'
+import { isTradingDay, isIntraday, isAfterClose, nowMinutes } from './scheduler/time'
+import { logInfo, logWarn, logError } from './logger'
 import type { Pool } from 'pg'
 
 const TICK_MS = 30_000 // 每 30s 检查一次时段状态
@@ -24,28 +27,6 @@ export interface SchedulerState {
 
 let state: SchedulerState = { running: false, lastEstimateAt: 0, navTodayDone: false, adviceTodayDone: false, lastLog: '未启动' }
 let timer: NodeJS.Timeout | null = null
-
-/** 国内时区 HH:MM（分钟） */
-function nowMinutes(): number {
-  const d = new Date()
-  return d.getHours() * 60 + d.getMinutes()
-}
-
-/** 是否交易日：周一到周五（法定节假日不处理） */
-export function isTradingDay(d = new Date()): boolean {
-  const day = d.getDay()
-  return day >= 1 && day <= 5
-}
-
-/** 盘中时段：9:30-11:30 或 13:00-15:00 */
-export function isIntraday(m = nowMinutes()): boolean {
-  return (m >= 9 * 60 + 30 && m <= 11 * 60 + 30) || (m >= 13 * 60 && m <= 15 * 60)
-}
-
-/** 盘后（净值/AI 分析可跑）：>= 15:30 */
-export function isAfterClose(m = nowMinutes()): boolean {
-  return m >= 15 * 60 + 30
-}
 
 /** 今天是否已确认当日净值（latestNavDate >= today） */
 async function navTodayConfirmed(pool: Pool): Promise<boolean> {
@@ -92,7 +73,11 @@ async function tick(): Promise<void> {
         state.lastEstimateAt = Date.now()
         const r = await sampleEstimatesCore(pool)
         state.lastLog = `估值采样 ${r.sampled} 条（${new Date().toLocaleTimeString('zh-CN', { hour12: false })}）`
-        if (r.sampled > 0) console.log(`[scheduler] ${state.lastLog}`)
+        if (r.sampled > 0) {
+          console.log(`[scheduler] ${state.lastLog}`)
+          logInfo(`[scheduler] ${state.lastLog}`)
+        }
+        if (r.errors > 0) logWarn(`[scheduler] 估值采样失败 ${r.errors} 条`)
       }
     } else if (isAfterClose(m)) {
       // 2. 盘后净值增量（15:30 起，每 navCheckMinutes 轮询直至当日净值出现）
@@ -102,7 +87,17 @@ async function tick(): Promise<void> {
           const confirmed = await navTodayConfirmed(pool)
           state.lastLog = `净值增量 ${r.done}/${r.total}${confirmed ? '（当日净值已确认）' : '（等待公布，稍后重试）'}`
           console.log(`[scheduler] ${state.lastLog}`)
+          logInfo(`[scheduler] ${state.lastLog}`)
           if (confirmed || m >= 22 * 60) state.navTodayDone = true
+          // 当日净值确认后顺带清理过期估值（保留最近 30 天，防盘中采样膨胀）
+          if (confirmed) {
+            try {
+              const removed = await cleanupOldEstimates(pool, 30)
+              if (removed > 0) logInfo(`[scheduler] 清理过期估值采样 ${removed} 条`)
+            } catch (e) {
+              logWarn(`[scheduler] 估值清理失败: ${(e as Error).message}`)
+            }
+          }
         } else {
           state.navTodayDone = true
         }
@@ -115,9 +110,11 @@ async function tick(): Promise<void> {
           const r = await runAnalyzeAllCore(pool, aiFundPool)
           state.lastLog = `AI 分析 ${r.done}/${r.total}（通知 ${r.notified}）`
           console.log(`[scheduler] ${state.lastLog}`)
+          logInfo(`[scheduler] ${state.lastLog}`)
           state.adviceTodayDone = true
         } catch (e) {
           console.error(`[scheduler] AI 分析失败: ${(e as Error).message}`)
+          logError(`[scheduler] AI 分析失败: ${(e as Error).message}`)
         } finally {
           await aiFundPool.end().catch(() => {})
         }
@@ -125,6 +122,7 @@ async function tick(): Promise<void> {
     }
   } catch (e) {
     console.error(`[scheduler] tick 异常: ${(e as Error).message}`)
+    logError(`[scheduler] tick 异常: ${(e as Error).message}`)
   } finally {
     await pool.end().catch(() => {})
   }
@@ -134,6 +132,7 @@ async function tick(): Promise<void> {
 export function startScheduler(): boolean {
   if (timer) return false
   console.log(`[scheduler] 启动（tick ${TICK_MS / 1000}s，交易日 ${isTradingDay() ? '是' : '否'}）`)
+  logInfo(`[scheduler] 启动（tick ${TICK_MS / 1000}s，交易日 ${isTradingDay() ? '是' : '否'}）`)
   state.running = true
   state.lastEstimateAt = 0
   state.navTodayDone = false

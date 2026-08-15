@@ -30,3 +30,12 @@ export async function latestEstimate(pool: Pool, code: string): Promise<{ estPct
   )
   return r.rows[0] ? { estPct: r.rows[0].est_pct, estTime: r.rows[0].est_time } : null
 }
+
+/** 清理过期估值采样（默认保留最近 30 天；盘中 30s 采样数据量大，需定期清理防膨胀） */
+export async function cleanupOldEstimates(pool: Pool, keepDays = 30): Promise<number> {
+  const res = await pool.query(
+    `DELETE FROM fund_estimate WHERE est_time < now() - make_interval(days => $1)`,
+    [keepDays]
+  )
+  return res.rowCount ?? 0
+}

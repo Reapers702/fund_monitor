@@ -29,6 +29,37 @@ export interface PositionSummary {
 /** 买入：新成本 = (旧份额×旧成本 + 份额×价格 + 费率) / 新份额 */
 /** 卖出：已实现 = (卖出价 − 平均成本) × 份额 − 费率；份额减少，成本不变 */
 
+export interface TradeLike {
+  tradeType: 'buy' | 'sell'
+  shares: number
+  price: number
+  fee: number
+}
+
+/**
+ * 移动加权平均核心算法（纯函数，独立便于单测）：
+ * 按时间序处理买卖流水，返回 份额/平均成本/已实现盈亏。
+ * 卖出超持份额时截断（不会变负）。
+ */
+export function computePositionFromTrades(trades: TradeLike[]): { shares: number; avgCost: number; realizedPnl: number } {
+  let shares = 0
+  let cost = 0 // 平均成本（无持仓时 0）
+  let realizedPnl = 0
+
+  for (const t of trades) {
+    if (t.tradeType === 'buy') {
+      const newShares = shares + t.shares
+      cost = newShares > 0 ? (shares * cost + t.shares * t.price + t.fee) / newShares : 0
+      shares = newShares
+    } else {
+      const sellShares = Math.min(t.shares, shares)
+      realizedPnl += (t.price - cost) * sellShares - t.fee
+      shares -= sellShares
+    }
+  }
+  return { shares, avgCost: cost, realizedPnl }
+}
+
 export async function listTrades(pool: Pool, fundCode?: string): Promise<TradeRow[]> {
   const r = await pool.query<{
     id: number
@@ -61,23 +92,9 @@ export async function listTrades(pool: Pool, fundCode?: string): Promise<TradeRo
 /** 移动加权平均持仓汇总（无交易则返回 null 份额为 0） */
 export async function computePosition(pool: Pool, fundCode: string): Promise<PositionSummary> {
   const trades = await listTrades(pool, fundCode)
-
-  let shares = 0
-  let cost = 0 // 平均成本（初始 null）
-  let realizedPnl = 0
-
-  for (const t of trades) {
-    if (t.tradeType === 'buy') {
-      const newShares = shares + t.shares
-      // 旧市值 + 本次买入金额(含费) → 新平均成本
-      cost = newShares > 0 ? (shares * cost + t.shares * t.price + t.fee) / newShares : 0
-      shares = newShares
-    } else {
-      const sellShares = Math.min(t.shares, shares)
-      realizedPnl += (t.price - cost) * sellShares - t.fee
-      shares -= sellShares
-    }
-  }
+  const { shares, avgCost: cost, realizedPnl } = computePositionFromTrades(
+    trades.map((t) => ({ tradeType: t.tradeType, shares: t.shares, price: t.price, fee: t.fee }))
+  )
 
   const name = await pool.query<{ fund_name: string }>('SELECT fund_name FROM fund_basic WHERE fund_code = $1', [fundCode])
   const nav = await pool.query<{ dwjz: string | null }>(
