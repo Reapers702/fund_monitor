@@ -39,3 +39,31 @@ export async function cleanupOldEstimates(pool: Pool, keepDays = 30): Promise<nu
   )
   return res.rowCount ?? 0
 }
+
+/**
+ * 记录某交易日"盘中估值 vs 收盘实际净值"误差（T3 可信度验证）：
+ * 取当日最后一次估值采样（est_time 在当日），与 fund_nav_daily 当日 jzzzl 对比，写 fund_estimate_diff。
+ * 每基金每天一行（upsert），仅记录估值与净值都非空的交易日。
+ */
+export async function recordEstimateDiffs(pool: Pool, tradeDate: string): Promise<number> {
+  const res = await pool.query(
+    `INSERT INTO fund_estimate_diff (fund_code, trade_date, source, est_pct, nav_pct, diff_pct)
+     SELECT e.fund_code, $1::date, e.source, e.est_pct, n.jzzzl, round((e.est_pct - n.jzzzl)::numeric, 4)
+     FROM (
+       SELECT DISTINCT ON (fund_code) fund_code, source, est_pct
+       FROM fund_estimate
+       WHERE est_time >= $1::date AND est_time < $1::date + interval '1 day'
+       ORDER BY fund_code, est_time DESC
+     ) e
+     JOIN fund_nav_daily n ON n.fund_code = e.fund_code AND n.trade_date = $1::date
+     WHERE e.est_pct IS NOT NULL AND n.jzzzl IS NOT NULL
+     ON CONFLICT (fund_code, trade_date) DO UPDATE SET
+       source = EXCLUDED.source,
+       est_pct = EXCLUDED.est_pct,
+       nav_pct = EXCLUDED.nav_pct,
+       diff_pct = EXCLUDED.diff_pct,
+       created_at = now()`,
+    [tradeDate]
+  )
+  return res.rowCount ?? 0
+}

@@ -37,6 +37,18 @@ export const SCHEMA_STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_est ON fund_estimate (fund_code, est_time DESC)`,
 
+  `CREATE TABLE IF NOT EXISTS fund_estimate_diff (
+      fund_code   VARCHAR(8)  NOT NULL,
+      trade_date  DATE        NOT NULL,
+      source      VARCHAR(24),
+      est_pct     NUMERIC(8,4),
+      nav_pct     NUMERIC(8,4),
+      diff_pct    NUMERIC(8,4),
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT pk_est_diff PRIMARY KEY (fund_code, trade_date)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_est_diff ON fund_estimate_diff (fund_code, trade_date DESC)`,
+
   `CREATE TABLE IF NOT EXISTS fund_holdings (
       id           BIGSERIAL PRIMARY KEY,
       fund_code    VARCHAR(8) NOT NULL,

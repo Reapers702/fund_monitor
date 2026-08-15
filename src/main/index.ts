@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow } from 'electron'
+import { app, shell, BrowserWindow, Tray, Menu, nativeImage } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -239,10 +239,49 @@ if (process.argv.includes('--check')) {
       optimizer.watchWindowShortcuts(window)
     })
 
+    const win = createWindow()
     // 注册全部 IPC 处理器（app:ping / app:getAppInfo，业务模块后续在此扩展）
-    registerIpcHandlers(createWindow())
+    registerIpcHandlers(win)
 
-    // 后台调度器：盘中估值采样 / 盘后净值增量 / 收盘后 AI 分析（主窗口常驻时运行）
+    // 托盘常驻（Windows/Linux）：关窗最小化到托盘，后台调度器继续运行；托盘菜单"退出"才是真正退出
+    // macOS 走系统 Dock（不建托盘），"显示主窗口"由 activate 事件处理
+    let tray: Tray | null = null
+    let isQuitting = false
+    if (process.platform !== 'darwin') {
+      const trayIcon = nativeImage.createFromPath(icon).resize({ width: 16, height: 16 })
+      tray = new Tray(trayIcon)
+      tray.setToolTip('基金监控与 AI 推荐系统')
+      const showWin = (): void => {
+        win.show()
+        win.focus()
+      }
+      tray.on('click', showWin) // Windows 单击托盘图标显示窗口
+      tray.setContextMenu(
+        Menu.buildFromTemplate([
+          { label: '显示主窗口', click: showWin },
+          { type: 'separator' },
+          {
+            label: '退出',
+            click: () => {
+              isQuitting = true
+              app.quit()
+            }
+          }
+        ])
+      )
+      // 关闭按钮 → 隐藏到托盘（不退出，采集/AI 分析继续）；真正退出走托盘菜单或 app.quit()
+      win.on('close', (e) => {
+        if (!isQuitting) {
+          e.preventDefault()
+          win.hide()
+        }
+      })
+    }
+    app.on('before-quit', () => {
+      isQuitting = true
+    })
+
+    // 后台调度器：盘中估值采样 / 盘后净值增量 / 收盘后 AI 分析（托盘常驻时也持续运行）
     startScheduler()
 
     app.on('activate', function () {

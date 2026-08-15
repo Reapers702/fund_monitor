@@ -9,7 +9,7 @@ import { sampleEstimatesCore } from './quotes'
 import { runAnalyzeAllCore } from './analyze'
 import { syncFund } from './fund'
 import { latestNavDate } from './storage/fundRepo'
-import { cleanupOldEstimates } from './storage/estimateRepo'
+import { cleanupOldEstimates, recordEstimateDiffs } from './storage/estimateRepo'
 import { todayStr } from './quotes'
 import { isIntraday, isAfterClose, nowMinutes } from './scheduler/time'
 import { isTradingDay as isTradingDayCal, isTradingDayStatic } from './scheduler/tradingCalendar'
@@ -91,8 +91,14 @@ async function tick(): Promise<void> {
           console.log(`[scheduler] ${state.lastLog}`)
           logInfo(`[scheduler] ${state.lastLog}`)
           if (confirmed || m >= 22 * 60) state.navTodayDone = true
-          // 当日净值确认后顺带清理过期估值（保留最近 30 天，防盘中采样膨胀）
+          // 当日净值确认后：记录"盘中估值 vs 实际净值"误差（T3 可信度验证），并清理过期估值（保留最近 30 天）
           if (confirmed) {
+            try {
+              const diffRows = await recordEstimateDiffs(pool, todayStr())
+              if (diffRows > 0) logInfo(`[scheduler] 记录估值误差 ${diffRows} 条（${todayStr()}）`)
+            } catch (e) {
+              logWarn(`[scheduler] 估值误差记录失败: ${(e as Error).message}`)
+            }
             try {
               const removed = await cleanupOldEstimates(pool, 30)
               if (removed > 0) logInfo(`[scheduler] 清理过期估值采样 ${removed} 条`)

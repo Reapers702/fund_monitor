@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { NCard, NForm, NFormItem, NInput, NInputNumber, NSelect, NButton, NDivider, NSpace, NSpin, NAlert, useMessage } from 'naive-ui'
+import { NCard, NForm, NFormItem, NInput, NInputNumber, NSelect, NButton, NDivider, NSpace, NSpin, NAlert, NSwitch, useMessage } from 'naive-ui'
 
 const message = useMessage()
 const loading = ref(true)
@@ -20,7 +20,8 @@ const form = ref({
   holdingsRefreshDays: 7,
   estimateIntervalSeconds: 30,
   analyzerMinutes: '35',
-  fetchChannel: 'node' as 'node' | 'browser' | 'auto'
+  fetchChannel: 'node' as 'node' | 'browser' | 'auto',
+  autoLaunch: false
 })
 
 async function load(): Promise<void> {
@@ -39,13 +40,26 @@ async function load(): Promise<void> {
       holdingsRefreshDays: cfg.fetcher.holdingsRefreshDays,
       estimateIntervalSeconds: cfg.fetcher.estimateIntervalSeconds,
       analyzerMinutes: cfg.analyzer.minutes,
-      fetchChannel: cfg.fetch.channel
+      fetchChannel: cfg.fetch.channel,
+      autoLaunch: false
     }
     info.value = await window.api.getAppInfo()
+    form.value.autoLaunch = await window.api.getAutoLaunch()
   } catch (e) {
     message.error(`读取配置失败: ${(e as Error).message}`)
   } finally {
     loading.value = false
+  }
+}
+
+/** 开机自启开关即时生效（写系统登录项），失败回滚 */
+async function onAutoLaunchChange(v: boolean): Promise<void> {
+  try {
+    form.value.autoLaunch = await window.api.setAutoLaunch(v)
+    if (form.value.autoLaunch) message.success('已开启开机自启（启动后最小化到托盘）')
+  } catch (e) {
+    form.value.autoLaunch = !v
+    message.error(`设置开机自启失败: ${(e as Error).message}`)
   }
 }
 
@@ -135,6 +149,12 @@ onMounted(load)
               ]"
             />
           </n-form-item>
+          <n-form-item label="开机自启">
+            <n-space align="center" :size="10">
+              <n-switch v-model:value="form.autoLaunch" :disabled="loading" @update:value="onAutoLaunchChange" />
+              <span class="opt-hint">开启后随系统启动并最小化到托盘，后台采集持续运行</span>
+            </n-space>
+          </n-form-item>
         </n-form>
       </n-card>
 
@@ -163,6 +183,11 @@ onMounted(load)
 
 .tip {
   margin-top: 4px;
+}
+
+.opt-hint {
+  font-size: 12px;
+  color: var(--text-color-3);
 }
 
 .env-info {

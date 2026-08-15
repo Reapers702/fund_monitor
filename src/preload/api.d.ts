@@ -231,14 +231,31 @@ interface EstimateGuideFund {
   match: { source: 'tracking_index' | 'theme_etf'; name: string; secid: string } | null
 }
 
+// 估值误差统计（estimate:diff 返回）：盘中估值 vs 收盘实际净值的差异
+interface EstimateDiffStat {
+  fundCode: string
+  fundName: string
+  source: string // tracking_index / theme_etf / holdings_weighted
+  samples: number // 参与统计的交易日数
+  avgAbsDiff: number | null // 平均绝对误差（百分点）
+  avgDiff: number | null // 平均误差（正 = 估值偏高）
+  latestTradeDate: string | null
+  latestDiff: number | null
+  latestEst: number | null
+  latestNav: number | null
+}
+
 // 渲染进程可用的业务 API（与 src/main/ipc.ts 的 handler 一一对应）
 interface FundApi {
   ping: () => Promise<string>
   getAppInfo: () => Promise<AppInfo>
+  getAutoLaunch: () => Promise<boolean>
+  setAutoLaunch: (enabled: boolean) => Promise<boolean>
   fundsList: () => Promise<FundCard[]>
   fundsAdd: (code: string) => Promise<FundSyncResult>
   fundsToggle: (code: string, active: boolean) => Promise<void>
   estimateGuide: () => Promise<EstimateGuideFund[]>
+  estimateDiff: (days?: number) => Promise<EstimateDiffStat[]>
   fundDetail: (code: string, days?: number) => Promise<FundDetail>
   adviceAnalyze: (code: string) => Promise<AdviceRunResult>
   quotesRun: () => Promise<QuotesRunResult>

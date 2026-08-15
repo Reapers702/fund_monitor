@@ -5,11 +5,14 @@ import { electronAPI } from '@electron-toolkit/preload'
 const api: FundApi = {
   ping: (): Promise<string> => ipcRenderer.invoke('app:ping'),
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getAppInfo'),
+  getAutoLaunch: (): Promise<boolean> => ipcRenderer.invoke('app:getAutoLaunch'),
+  setAutoLaunch: (enabled: boolean): Promise<boolean> => ipcRenderer.invoke('app:setAutoLaunch', enabled),
 
   fundsList: (): Promise<FundCard[]> => ipcRenderer.invoke('funds:list'),
   fundsAdd: (code: string): Promise<FundSyncResult> => ipcRenderer.invoke('funds:add', code),
   fundsToggle: (code: string, active: boolean): Promise<void> => ipcRenderer.invoke('funds:toggle', code, active),
   estimateGuide: (): Promise<EstimateGuideFund[]> => ipcRenderer.invoke('estimate:guide'),
+  estimateDiff: (days?: number): Promise<EstimateDiffStat[]> => ipcRenderer.invoke('estimate:diff', days ?? 20),
 
   fundDetail: (code: string, days = 120): Promise<FundDetail> => ipcRenderer.invoke('fund:detail', code, days),
   adviceAnalyze: (code: string): Promise<AdviceRunResult> => ipcRenderer.invoke('advice:analyze', code),

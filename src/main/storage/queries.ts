@@ -272,3 +272,69 @@ export async function estimateGuide(pool: Pool): Promise<EstimateGuideRow[]> {
     holdingsDate: holdingsMap.get(f.fund_code) ?? null
   }))
 }
+
+// ---------- 估值误差统计（估值说明页：T1/T2/T3 可信度验证） ----------
+
+export interface EstimateDiffStat {
+  fundCode: string
+  fundName: string
+  source: string
+  samples: number // 参与统计的交易日数
+  avgAbsDiff: number | null // 平均绝对误差（百分点）
+  avgDiff: number | null // 平均误差（正 = 估值偏高）
+  latestTradeDate: string | null
+  latestDiff: number | null
+  latestEst: number | null
+  latestNav: number | null
+}
+
+/** 最近 days 个自然日内每基金每种估值方式的误差统计 + 最新一条明细 */
+export async function estimateDiffStats(pool: Pool, days = 20): Promise<EstimateDiffStat[]> {
+  const stats = await pool.query<{
+    fund_code: string
+    fund_name: string
+    source: string
+    samples: number
+    avg_abs_diff: string | null
+    avg_diff: string | null
+  }>(
+    `SELECT d.fund_code, b.fund_name, d.source,
+            count(*)::int AS samples,
+            round(avg(abs(d.diff_pct))::numeric, 3) AS avg_abs_diff,
+            round(avg(d.diff_pct)::numeric, 3) AS avg_diff
+     FROM fund_estimate_diff d
+     JOIN fund_basic b ON b.fund_code = d.fund_code
+     WHERE d.trade_date > CURRENT_DATE - make_interval(days => $1)
+     GROUP BY d.fund_code, b.fund_name, d.source
+     ORDER BY d.fund_code, d.source`,
+    [days]
+  )
+  const latest = await pool.query<{
+    fund_code: string
+    source: string
+    trade_date: Date
+    diff_pct: string | null
+    est_pct: string | null
+    nav_pct: string | null
+  }>(
+    `SELECT DISTINCT ON (fund_code, source) fund_code, source, trade_date, diff_pct, est_pct, nav_pct
+     FROM fund_estimate_diff
+     ORDER BY fund_code, source, trade_date DESC`
+  )
+  const latestMap = new Map(latest.rows.map((l) => [`${l.fund_code}|${l.source}`, l]))
+  return stats.rows.map((s) => {
+    const l = latestMap.get(`${s.fund_code}|${s.source}`)
+    return {
+      fundCode: s.fund_code,
+      fundName: s.fund_name,
+      source: s.source,
+      samples: s.samples,
+      avgAbsDiff: s.avg_abs_diff === null ? null : Number(s.avg_abs_diff),
+      avgDiff: s.avg_diff === null ? null : Number(s.avg_diff),
+      latestTradeDate: l ? l.trade_date.toISOString().slice(0, 10) : null,
+      latestDiff: l && l.diff_pct !== null ? Number(l.diff_pct) : null,
+      latestEst: l && l.est_pct !== null ? Number(l.est_pct) : null,
+      latestNav: l && l.nav_pct !== null ? Number(l.nav_pct) : null
+    }
+  })
+}

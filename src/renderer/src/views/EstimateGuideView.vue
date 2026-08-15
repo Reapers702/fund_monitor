@@ -5,6 +5,7 @@ import { NCard, NGrid, NGi, NTable, NTag, NSpin, NAlert, NSpace, useMessage } fr
 const message = useMessage()
 const loading = ref(true)
 const funds = ref<EstimateGuideFund[]>([])
+const diffs = ref<EstimateDiffStat[]>([])
 
 interface MethodInfo {
   tag: string
@@ -71,10 +72,18 @@ function fmtTime(iso: string | null): string {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
+/** 带符号的百分比：+0.32 表示估值比实际净值高 0.32 个百分点 */
+function fmtSignedPct(v: number | null): string {
+  if (v === null) return '—'
+  return (v > 0 ? '+' : '') + v.toFixed(2) + '%'
+}
+
 async function load(): Promise<void> {
   loading.value = true
   try {
-    funds.value = await window.api.estimateGuide()
+    const [f, d] = await Promise.all([window.api.estimateGuide(), window.api.estimateDiff(20)])
+    funds.value = f
+    diffs.value = d
   } catch (e) {
     message.error(`加载估值方式失败: ${(e as Error).message}`)
   } finally {
@@ -145,6 +154,44 @@ onMounted(load)
         </n-alert>
       </n-spin>
     </n-card>
+
+    <n-card title="估值误差 · 最近 20 日（盘中估值 vs 收盘实际净值）" class="funds-card">
+      <n-spin :show="loading">
+        <n-table :bordered="false" size="small" class="funds-table">
+          <thead>
+            <tr>
+              <th>代码</th>
+              <th>名称</th>
+              <th>方式</th>
+              <th>样本日数</th>
+              <th>平均绝对误差</th>
+              <th>平均误差</th>
+              <th>最近交易日</th>
+              <th>最近差值</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="d in diffs" :key="d.fundCode + d.source">
+              <td class="mono">{{ d.fundCode }}</td>
+              <td>{{ d.fundName }}</td>
+              <td>
+                <n-tag :type="sourceTag(d.source).color" size="small" :bordered="false">
+                  {{ sourceTag(d.source).text }}
+                </n-tag>
+              </td>
+              <td>{{ d.samples }}</td>
+              <td class="num">{{ d.avgAbsDiff === null ? '—' : d.avgAbsDiff.toFixed(3) + '%' }}</td>
+              <td class="num">{{ fmtSignedPct(d.avgDiff) }}</td>
+              <td class="mono">{{ d.latestTradeDate ?? '—' }}</td>
+              <td class="num">{{ fmtSignedPct(d.latestDiff) }}</td>
+            </tr>
+          </tbody>
+        </n-table>
+        <n-alert type="info" :bordered="false" class="foot-note">
+          差值 = 当日最后一次盘中估值 − 当日收盘实际净值涨跌（正 = 估值偏高）。样本日数需积累数周才有意义；T3 误差一般明显大于 T1，若平均绝对误差持续过大，说明该基金重仓股与季报偏离较多，估值仅供参考。
+        </n-alert>
+      </n-spin>
+    </n-card>
   </div>
 </template>
 
@@ -202,6 +249,12 @@ onMounted(load)
 .mono {
   font-family: monospace;
   font-size: 12px;
+}
+
+.num {
+  font-family: monospace;
+  font-size: 12px;
+  text-align: right;
 }
 
 .match-cell {

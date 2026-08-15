@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { ipcMain, app } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { loadConfig, saveConfig } from './config'
 import { createPool, createAiFundPool, ensureSchema } from './storage/db'
@@ -10,7 +10,8 @@ import {
   latestHoldings,
   fundBasic,
   adviceList,
-  estimateGuide
+  estimateGuide,
+  estimateDiffStats
 } from './storage/queries'
 import { findTrackingIndex } from './crawler/estimate'
 import { syncFund } from './fund'
@@ -42,6 +43,25 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     chrome: process.versions.chrome ?? '',
     platform: process.platform
   }))
+
+  // 开机自启（Windows/Linux 写注册表/LaunchAgents；macOS 走系统登录项，统一由本 API 管理）
+  ipcMain.handle('app:getAutoLaunch', (): boolean => {
+    if (process.platform === 'darwin') return false
+    try {
+      return app.getLoginItemSettings().openAtLogin
+    } catch {
+      return false
+    }
+  })
+  ipcMain.handle('app:setAutoLaunch', (_e, enabled: boolean): boolean => {
+    if (process.platform === 'darwin') return false
+    try {
+      app.setLoginItemSettings({ openAtLogin: enabled, openAsHidden: true })
+      return enabled
+    } catch {
+      return false
+    }
+  })
 
   // ---------- 基金 ----------
 
@@ -186,6 +206,20 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
       })
     } catch (e) {
       console.error('[ipc] estimate:guide 失败:', (e as Error).message)
+      throw e
+    } finally {
+      await pool.end().catch(() => {})
+    }
+  })
+
+  // 估值误差统计（估值说明页：各基金 T1/T2/T3 最近 N 日估值 vs 实际净值误差）
+  ipcMain.handle('estimate:diff', async (_e, days = 20): Promise<EstimateDiffStat[]> => {
+    const cfg = loadConfig()
+    const pool = createPool(cfg)
+    try {
+      return await estimateDiffStats(pool, days)
+    } catch (e) {
+      console.error('[ipc] estimate:diff 失败:', (e as Error).message)
       throw e
     } finally {
       await pool.end().catch(() => {})
