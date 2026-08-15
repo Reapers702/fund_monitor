@@ -1,12 +1,8 @@
-// 行情源（计划书 §4.1 #5/#E）：主 push2/push2his（东财），降级 腾讯 qt.gtimg / 新浪 hq.sinajs
-// push2 偶发 IP 风控（实测：短时高频请求会全站 000），降级通道保证盘中估值/实时价持续可用
+// 行情源（计划书 §4.1 #5/#E）：主 push2/push2his（东财），降级 腾讯 qt.gtimg / web.ifzq
+// 熔断策略：push2 偶发 IP 风控（实测 socket hang up 全站 000），一旦连接被拒即熔断，
+// 本次运行后续请求直接走腾讯；每 5 分钟探活一次尝试恢复。行情请求不重试（降级源保证可用性）。
 import { httpGetJson, httpGetText } from './httpClient'
 import { parseNum } from '../utils'
-
-/** 6 位证券代码 → 东财 secid：沪市(6/9 开头，含 688) → 1.，深市/北交所 → 0. */
-export function secidOf(code: string): string {
-  return /^[69]/.test(code) ? `1.${code}` : `0.${code}`
-}
 
 /** 东财 secid（1.000300 / 0.399006 / 1.600519）→ 腾讯/新浪市场前缀代码（sh600519 / sz399006） */
 function secidToMarketCode(secid: string): string {
@@ -14,6 +10,32 @@ function secidToMarketCode(secid: string): string {
   if (mkt === '1') return `sh${code}`
   if (mkt === '0') return `sz${code}`
   return code
+}
+
+/** 6 位证券代码 → 东财 secid：沪市(6/9 开头，含 688) → 1.，深市/北交所 → 0. */
+export function secidOf(code: string): string {
+  return /^[69]/.test(code) ? `1.${code}` : `0.${code}`
+}
+
+// ---------- push2 熔断器 ----------
+
+let push2BlockedUntil = 0 // 熔断截止时间戳（ms）；0 = 未熔断
+const BLOCK_MS = 5 * 60_000 // 熔断 5 分钟后探活恢复
+
+/** 是否处于熔断期（熔断期内直接走腾讯，不试探东财） */
+function push2Blocked(): boolean {
+  return Date.now() < push2BlockedUntil
+}
+
+/** 触发熔断（连接被拒/持续失败）；供 quote/klines 调用 */
+function blockPush2(): void {
+  if (push2BlockedUntil === 0) console.warn('[market] push2 连接被拒，熔断 5 分钟，行情走腾讯降级')
+  push2BlockedUntil = Date.now() + BLOCK_MS
+}
+
+/** 判断是否"连接级"失败（socket hang up / fetch failed / ECONNRESET 等，重试无意义） */
+function isConnError(msg: string): boolean {
+  return /socket hang up|fetch failed|ECONN|ETIMEDOUT|ENOTFOUND|连接被拒绝|EAI_AGAIN/i.test(msg)
 }
 
 // ---------- 实时行情 ----------
@@ -37,17 +59,19 @@ export async function stockQuote(code: string): Promise<StockQuote> {
   return quoteBySecid(secidOf(code))
 }
 
-/** 按完整 secid 查实时行情（指数等非证券代码直接用，如 1.000300），push2 失败自动降级腾讯/新浪 */
+/** 按完整 secid 查实时行情（指数等非证券代码直接用，如 1.000300），push2 熔断/失败自动降级腾讯 */
 export async function quoteBySecid(secid: string): Promise<StockQuote> {
   const code = secid.split('.')[1] ?? secid
+  if (push2Blocked()) {
+    return quoteFallbackTencent(secidToMarketCode(secid), code)
+  }
   try {
     const d = await httpGetJson<{ data?: Record<string, unknown> }>(
       `https://push2.eastmoney.com/api/qt/stock/get?secid=${secid}` +
         `&fields=f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170&invt=2&fltt=2`,
-      { referer: 'https://quote.eastmoney.com/' }
+      { referer: 'https://quote.eastmoney.com/', retries: 0 }
     )
     const q = d.data ?? {}
-    const pct = parseNum(q.f170)
     return {
       code: String(q.f57 ?? code),
       name: String(q.f58 ?? ''),
@@ -57,12 +81,14 @@ export async function quoteBySecid(secid: string): Promise<StockQuote> {
       low: parseNum(q.f45),
       prevClose: parseNum(q.f60),
       change: parseNum(q.f169),
-      pct,
+      pct: parseNum(q.f170),
       volume: parseNum(q.f47),
       amount: parseNum(q.f48)
     }
   } catch (e) {
-    console.warn(`[market] push2 ${secid} 失败，降级腾讯: ${(e as Error).message}`)
+    const msg = (e as Error).message
+    if (isConnError(msg)) blockPush2()
+    console.warn(`[market] push2 ${secid} 失败，降级腾讯: ${msg}`)
     return quoteFallbackTencent(secidToMarketCode(secid), code)
   }
 }
@@ -70,7 +96,7 @@ export async function quoteBySecid(secid: string): Promise<StockQuote> {
 /** 腾讯行情：qt.gtimg.cn/q=sh600519,sz000807，GBK，~ 分隔。
  *  字段：1名称 2代码 3现价 4昨收 5今开 31涨跌额 32涨跌% 33最高 34最低 36成交量(手) 37成交额(万) */
 async function quoteFallbackTencent(mktCode: string, code: string): Promise<StockQuote> {
-  const text = await httpGetText(`https://qt.gtimg.cn/q=${mktCode}`, { referer: 'https://gu.qq.com/' })
+  const text = await httpGetText(`https://qt.gtimg.cn/q=${mktCode}`, { referer: 'https://gu.qq.com/', retries: 0 })
   const m = text.match(/="([^"]+)"/)
   const parts = m ? m[1].split('~') : []
   if (parts.length < 35) {
@@ -118,11 +144,14 @@ interface KlineResp {
  */
 export async function stockKlines(code: string, lmt = 120): Promise<{ name: string; rows: KlineRow[] }> {
   const secid = secidOf(code)
+  if (push2Blocked()) {
+    return klinesFallbackTencent(code, lmt)
+  }
   const url =
     `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}` +
     `&klt=101&fqt=1&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58&end=20500101&lmt=${lmt}`
   try {
-    const d = await httpGetJson<KlineResp>(url, { referer: 'https://quote.eastmoney.com/' })
+    const d = await httpGetJson<KlineResp>(url, { referer: 'https://quote.eastmoney.com/', retries: 0 })
     const rows: KlineRow[] = []
     for (const line of d.data?.klines ?? []) {
       const c = line.split(',')
@@ -140,7 +169,9 @@ export async function stockKlines(code: string, lmt = 120): Promise<{ name: stri
     }
     return { name: d.data?.name ?? '', rows }
   } catch (e) {
-    console.warn(`[market] push2his ${code} 失败，降级腾讯日K: ${(e as Error).message}`)
+    const msg = (e as Error).message
+    if (isConnError(msg)) blockPush2()
+    console.warn(`[market] push2his ${code} 失败，降级腾讯日K: ${msg}`)
     return klinesFallbackTencent(code, lmt)
   }
 }
@@ -151,7 +182,7 @@ async function klinesFallbackTencent(code: string, lmt: number): Promise<{ name:
   const mktCode = secidToMarketCode(secidOf(code))
   const text = await httpGetText(
     `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${mktCode},day,,,${lmt},qfq`,
-    { referer: 'https://gu.qq.com/' }
+    { referer: 'https://gu.qq.com/', retries: 0 }
   )
   const d = JSON.parse(text) as { data?: Record<string, { qfqday?: string[][] }> }
   const arr = d.data?.[mktCode]?.qfqday ?? []
