@@ -5,7 +5,7 @@ export function nowMinutes(d = new Date()): number {
   return d.getHours() * 60 + d.getMinutes()
 }
 
-/** 是否交易日：周一到周五（法定节假日不处理，属低频个人工具合理取舍） */
+/** 是否周末交易日（仅周末判断，不含节假日；完整交易日判断见 tradingCalendar.ts） */
 export function isTradingDay(d = new Date()): boolean {
   const day = d.getDay()
   return day >= 1 && day <= 5

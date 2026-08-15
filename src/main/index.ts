@@ -122,6 +122,31 @@ if (process.argv.includes('--check')) {
       app.exit(1)
     }
   })
+} else if (process.argv.includes('--calendar-test')) {
+  // 开发辅助：electron . --calendar-test 验证腾讯交易日历判断
+  app.whenReady().then(async () => {
+    try {
+      const { isTradingDay, isTradingDayStatic } = await import('./scheduler/tradingCalendar')
+      const cases: [string, string][] = [
+        ['2026-08-14', '周五'],
+        ['2026-08-15', '周六'],
+        ['2026-01-01', '元旦'],
+        ['2026-02-17', '春节(2/17)'],
+        ['2026-02-16', '春节假期'],
+        ['2026-02-23', '春节后周一']
+      ]
+      for (const [ds, label] of cases) {
+        const d = new Date(ds + 'T00:00:00')
+        const net = await isTradingDay(d)
+        const st = isTradingDayStatic(d)
+        console.log(`[calendar-test] ${ds}(${label}) 腾讯接口=${net ? '交易日' : '休市'} | 静态表=${st ? '交易日' : '休市'}`)
+      }
+      app.exit(0)
+    } catch (e) {
+      console.error(`[calendar-test] FAIL: ${(e as Error).message}`)
+      app.exit(1)
+    }
+  })
 } else if (process.argv.includes('--screenshot')) {
   // 开发辅助：electron . --screenshot <path> [--route <hash>]
   // 加载完成等待渲染后截屏保存（配合 M5 前端验证）
