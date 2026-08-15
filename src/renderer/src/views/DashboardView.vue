@@ -212,7 +212,7 @@ onBeforeUnmount(() => {
           <div class="card-foot">
             <n-tag v-if="f.isActive !== 1" size="tiny" type="default">已停用</n-tag>
             <n-tag v-else size="tiny" type="success">启用中</n-tag>
-            <span v-if="f.holdingsDate" class="holdings-date">持仓 {{ f.holdingsDate }}</span>
+            <span v-if="f.holdingsDate" class="holdings-date">重仓股季报 {{ f.holdingsDate }}</span>
           </div>
         </n-card>
       </div>

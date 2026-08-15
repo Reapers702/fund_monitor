@@ -178,7 +178,7 @@ watch(
             <n-descriptions-item label="基金经理">{{ detail.basic?.manager ?? '--' }}</n-descriptions-item>
             <n-descriptions-item label="成立日">{{ detail.basic?.foundDate ?? '--' }}</n-descriptions-item>
             <n-descriptions-item label="净值样本">{{ detail.basic?.navCount ?? 0 }} 条</n-descriptions-item>
-            <n-descriptions-item label="持仓报告期">{{ detail.holdings.reportDate ?? '--' }}</n-descriptions-item>
+            <n-descriptions-item label="重仓股季报">{{ detail.holdings.reportDate ?? '--' }}</n-descriptions-item>
             <n-descriptions-item label="盘中估值">
               <span :class="pctClass(detail.estimate[detail.estimate.length - 1]?.pct ?? null)">
                 {{ fmtPct(detail.estimate[detail.estimate.length - 1]?.pct ?? null) }}
