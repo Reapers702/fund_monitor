@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { NEmpty, NInput, NButton, NSpace, NCard, NTag, NSwitch, NSpin, useMessage } from 'naive-ui'
+import { NEmpty, NInput, NButton, NSpace, NCard, NTag, NSwitch, NSpin, NTooltip, NDivider, useMessage } from 'naive-ui'
 
 const router = useRouter()
 const message = useMessage()
@@ -9,7 +9,10 @@ const message = useMessage()
 const funds = ref<FundCard[]>([])
 const loading = ref(true)
 const adding = ref(false)
+const refreshing = ref(false)
+const analyzing = ref(false)
 const newCode = ref('')
+const scheduler = ref<SchedulerStatus | null>(null)
 
 async function load(): Promise<void> {
   loading.value = true
@@ -19,6 +22,14 @@ async function load(): Promise<void> {
     message.error(`加载基金列表失败: ${(e as Error).message}`)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadScheduler(): Promise<void> {
+  try {
+    scheduler.value = await window.api.schedulerStatus()
+  } catch {
+    scheduler.value = null
   }
 }
 
@@ -53,6 +64,50 @@ async function toggle(code: string, active: boolean): Promise<void> {
   }
 }
 
+/** 手动刷新行情+估值（调用主进程 runQuotesCore） */
+async function refreshQuotes(): Promise<void> {
+  refreshing.value = true
+  try {
+    const r = await window.api.quotesRun()
+    if (!r.ok || !r.result) {
+      message.error(`行情刷新失败: ${r.error ?? '未知错误'}`)
+      return
+    }
+    const est = r.result.estimates
+    message.success(
+      `行情刷新完成：${r.result.fundCount} 只基金 / ${r.result.stockCount} 只股票，估值采样 ${est.length} 条` +
+        (r.result.errors.length ? `，${r.result.errors.length} 处失败（见主进程日志）` : '')
+    )
+    await load() // 刷新卡片（估值/涨跌可能变化）
+  } catch (e) {
+    message.error(`行情刷新失败: ${(e as Error).message}`)
+  } finally {
+    refreshing.value = false
+  }
+}
+
+/** 手动触发全部基金 AI 分析 */
+async function analyzeAll(): Promise<void> {
+  analyzing.value = true
+  try {
+    const r = await window.api.adviceAnalyzeAll()
+    if (!r.ok || !r.result) {
+      message.error(`AI 分析失败: ${r.error ?? '未知错误'}`)
+      return
+    }
+    const res = r.result
+    message.success(
+      `AI 分析完成：${res.done}/${res.total} 只成功，${res.notified} 条通知` +
+        (res.done > 0 ? `，最新建议见基金详情页` : '')
+    )
+    await load()
+  } catch (e) {
+    message.error(`AI 分析失败: ${(e as Error).message}`)
+  } finally {
+    analyzing.value = false
+  }
+}
+
 function openDetail(code: string): void {
   router.push(`/fund/${code}`)
 }
@@ -67,7 +122,17 @@ function pctClass(v: number | null): string {
   return v > 0 ? 'up' : v < 0 ? 'down' : 'muted'
 }
 
-onMounted(load)
+let schedulerTimer: number | null = null
+
+onMounted(() => {
+  void load()
+  void loadScheduler()
+  schedulerTimer = window.setInterval(() => void loadScheduler(), 15_000)
+})
+
+onBeforeUnmount(() => {
+  if (schedulerTimer) window.clearInterval(schedulerTimer)
+})
 </script>
 
 <template>
@@ -81,6 +146,17 @@ onMounted(load)
         @keyup.enter="addFund"
       />
       <n-button type="primary" :loading="adding" @click="addFund">添加基金</n-button>
+      <n-divider vertical />
+      <n-button :loading="refreshing" @click="refreshQuotes">刷新行情/估值</n-button>
+      <n-button :loading="analyzing" @click="analyzeAll">全部 AI 分析</n-button>
+      <n-tooltip v-if="scheduler" placement="bottom">
+        <template #trigger>
+          <span class="sched-badge" :class="scheduler.running ? 'on' : 'off'">
+            {{ scheduler.running ? '调度运行中' : '调度未启动' }}
+          </span>
+        </template>
+        {{ scheduler.lastLog || '后台任务：盘中估值采样 / 盘后净值增量 / 收盘后 AI 分析' }}
+      </n-tooltip>
     </n-space>
 
     <n-spin :show="loading">
@@ -151,6 +227,23 @@ onMounted(load)
 
 .code-input {
   width: 260px;
+}
+
+.sched-badge {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  cursor: default;
+}
+
+.sched-badge.on {
+  color: #1f9d55;
+  background: rgba(31, 157, 85, 0.12);
+}
+
+.sched-badge.off {
+  color: var(--text-color-3);
+  background: rgba(128, 128, 128, 0.12);
 }
 
 .cards {

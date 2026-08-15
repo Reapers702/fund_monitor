@@ -8,6 +8,7 @@ import { runFund } from './fund'
 import { runQuotes } from './quotes'
 import { runNews } from './news'
 import { runAnalyzeAll, runAnalyzeOne } from './analyze'
+import { startScheduler, stopScheduler } from './scheduler'
 
 function createWindow(): BrowserWindow {
   // 主窗口（渲染进程 UI；爬虫走主进程 Node 通道 + 隐藏窗口，不依赖此窗口）
@@ -134,6 +135,20 @@ if (process.argv.includes('--check')) {
     win.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
         try {
+          // 开发验证：--ipc-test 时加载完成后调一次 quotes:run 并打印结果
+          if (process.argv.includes('--ipc-test')) {
+            const r = await win.webContents.executeJavaScript(
+              `window.api.quotesRun().then(r => JSON.stringify({ok: r.ok, funds: r.result?.fundCount, stocks: r.result?.stockCount, est: r.result?.estimates?.length}))`
+            )
+            console.log('[ipc-test] quotes:run →', r)
+          }
+          // --ipc-test-ai 时验证 advice:analyzeAll
+          if (process.argv.includes('--ipc-test-ai')) {
+            const r = await win.webContents.executeJavaScript(
+              `window.api.adviceAnalyzeAll().then(r => JSON.stringify({ok: r.ok, done: r.result?.done, total: r.result?.total, notified: r.result?.notified}))`
+            )
+            console.log('[ipc-test-ai] advice:analyzeAll →', r)
+          }
           const diag = await win.webContents
             .executeJavaScript(`({
               adviceBtn: [...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(t => t && t.includes('分析')),
@@ -172,6 +187,9 @@ if (process.argv.includes('--check')) {
     // 注册全部 IPC 处理器（app:ping / app:getAppInfo，业务模块后续在此扩展）
     registerIpcHandlers(createWindow())
 
+    // 后台调度器：盘中估值采样 / 盘后净值增量 / 收盘后 AI 分析（主窗口常驻时运行）
+    startScheduler()
+
     app.on('activate', function () {
       // On macOS it's common to re-create a window in the app when the
       // dock icon is clicked and there are no other windows open.
@@ -183,6 +201,7 @@ if (process.argv.includes('--check')) {
   // for applications and their menu bar to stay active until the user quits
   // explicitly with Cmd + Q.
   app.on('window-all-closed', () => {
+    stopScheduler()
     if (process.platform !== 'darwin') {
       app.quit()
     }

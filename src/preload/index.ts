@@ -12,6 +12,8 @@ const api: FundApi = {
 
   fundDetail: (code: string, days = 120): Promise<FundDetail> => ipcRenderer.invoke('fund:detail', code, days),
   adviceAnalyze: (code: string): Promise<AdviceRunResult> => ipcRenderer.invoke('advice:analyze', code),
+  quotesRun: (): Promise<QuotesRunResult> => ipcRenderer.invoke('quotes:run'),
+  adviceAnalyzeAll: (): Promise<AnalyzeAllRunResult> => ipcRenderer.invoke('advice:analyzeAll'),
 
   positionList: (): Promise<PositionSummary[]> => ipcRenderer.invoke('position:list'),
   positionDetail: (code: string): Promise<{ summary: PositionSummary; trades: TradeRow[] }> =>
@@ -25,7 +27,8 @@ const api: FundApi = {
   newsRecent: (limit?: number): Promise<NewsRow[]> => ipcRenderer.invoke('news:recent', limit),
 
   configGet: (): Promise<AppConfig> => ipcRenderer.invoke('config:get'),
-  configSave: (patch: Record<string, unknown>): Promise<AppConfig> => ipcRenderer.invoke('config:save', patch)
+  configSave: (patch: Record<string, unknown>): Promise<AppConfig> => ipcRenderer.invoke('config:save', patch),
+  schedulerStatus: (): Promise<SchedulerStatus> => ipcRenderer.invoke('scheduler:status')
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

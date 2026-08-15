@@ -14,6 +14,9 @@ import {
 import { syncFund } from './fund'
 import { analyzeFund, saveAdvice, todayStr } from './analyzer/analyze'
 import { notifyAdvice } from './notifier'
+import { runQuotesCore } from './quotes'
+import { runAnalyzeAllCore } from './analyze'
+import { getSchedulerState } from './scheduler'
 import { computePosition, listPositions, listTrades, addTrade, deleteTrade, getProfile, saveProfile } from './position/position'
 import type { TradeRow } from './position/position'
 
@@ -126,6 +129,40 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     }
   })
 
+  // 手动触发行情+估值采集（"我的基金"页"刷新行情/估值"按钮）
+  ipcMain.handle('quotes:run', async (): Promise<QuotesRunResult> => {
+    const cfg = loadConfig()
+    const pool = createPool(cfg)
+    try {
+      await ensureSchema(pool)
+      const r = await runQuotesCore(pool)
+      return { ok: true, error: null, result: r }
+    } catch (e) {
+      console.error('[ipc] quotes:run 失败:', (e as Error).message)
+      return { ok: false, error: (e as Error).message, result: null }
+    } finally {
+      await pool.end().catch(() => {})
+    }
+  })
+
+  // 手动触发全部基金 AI 分析（"我的基金"页"全部AI分析"按钮）
+  ipcMain.handle('advice:analyzeAll', async (): Promise<AnalyzeAllRunResult> => {
+    const cfg = loadConfig()
+    const pool = createPool(cfg)
+    const aiFundPool = createAiFundPool(cfg)
+    try {
+      await ensureSchema(pool)
+      const r = await runAnalyzeAllCore(pool, aiFundPool)
+      return { ok: true, error: null, result: r }
+    } catch (e) {
+      console.error('[ipc] advice:analyzeAll 失败:', (e as Error).message)
+      return { ok: false, error: (e as Error).message, result: null }
+    } finally {
+      await pool.end().catch(() => {})
+      await aiFundPool.end().catch(() => {})
+    }
+  })
+
   // ---------- 新闻（只读 ai_fund 库，采集由另一个 24h 程序完成） ----------
 
   ipcMain.handle('news:recent', async (_e, limit?: number): Promise<NewsRow[]> => {
@@ -201,6 +238,9 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
   })
 
   // ---------- 配置 ----------
+
+  // 后台调度器状态（设置页展示）
+  ipcMain.handle('scheduler:status', (): SchedulerStatus => getSchedulerState())
 
   ipcMain.handle('config:get', (): AppConfig => {
     return loadConfig()

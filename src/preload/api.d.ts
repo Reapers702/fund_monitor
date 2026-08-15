@@ -118,6 +118,39 @@ interface AdviceRunResult {
   } | null
 }
 
+// 行情+估值采集结果（quotes:run 返回）
+interface QuotesRunResult {
+  ok: boolean
+  error: string | null
+  result: {
+    fundCount: number
+    stockCount: number
+    klineAdded: number
+    estimates: { code: string; name: string; source: string; pct: number | null }[]
+    errors: { code: string; message: string }[]
+  } | null
+}
+
+// 全部基金 AI 分析结果（advice:analyzeAll 返回）
+interface AnalyzeAllRunResult {
+  ok: boolean
+  error: string | null
+  result: {
+    total: number
+    done: number
+    notified: number
+    items: {
+      code: string
+      name: string
+      done: boolean
+      notified: boolean
+      action?: string
+      confidence?: number
+      reason?: string
+    }[]
+  } | null
+}
+
 // ai_fund.raw_news 只读新闻行（summary/sentiment/llm_tags 由采集程序完成 LLM 增强）
 interface NewsRow {
   id: string
@@ -172,6 +205,15 @@ interface FundProfile {
   sellFeePct: number
 }
 
+// 后台调度器状态（scheduler:status 返回）
+interface SchedulerStatus {
+  running: boolean
+  lastEstimateAt: number
+  navTodayDone: boolean
+  adviceTodayDone: boolean
+  lastLog: string
+}
+
 // 渲染进程可用的业务 API（与 src/main/ipc.ts 的 handler 一一对应）
 interface FundApi {
   ping: () => Promise<string>
@@ -181,6 +223,8 @@ interface FundApi {
   fundsToggle: (code: string, active: boolean) => Promise<void>
   fundDetail: (code: string, days?: number) => Promise<FundDetail>
   adviceAnalyze: (code: string) => Promise<AdviceRunResult>
+  quotesRun: () => Promise<QuotesRunResult>
+  adviceAnalyzeAll: () => Promise<AnalyzeAllRunResult>
   positionList: () => Promise<PositionSummary[]>
   positionDetail: (code: string) => Promise<{ summary: PositionSummary; trades: TradeRow[] }>
   positionAddTrade: (t: TradeInput) => Promise<{ id: number; summary: PositionSummary }>
@@ -189,4 +233,5 @@ interface FundApi {
   newsRecent: (limit?: number) => Promise<NewsRow[]>
   configGet: () => Promise<AppConfig>
   configSave: (patch: Record<string, unknown>) => Promise<AppConfig>
+  schedulerStatus: () => Promise<SchedulerStatus>
 }
