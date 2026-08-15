@@ -32,7 +32,7 @@ export const SCHEMA_STATEMENTS: string[] = [
       est_time   TIMESTAMPTZ NOT NULL,
       est_nav    NUMERIC(10,4),
       est_pct    NUMERIC(8,4),
-      source     VARCHAR(16),
+      source     VARCHAR(24),
       CONSTRAINT uq_est UNIQUE (fund_code, est_time)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_est ON fund_estimate (fund_code, est_time DESC)`,

@@ -231,3 +231,44 @@ export async function adviceList(pool: Pool, code: string, limit = 20): Promise<
     createdAt: x.created_at.toISOString()
   }))
 }
+
+// ---------- 估值说明页（各基金当前估值方式） ----------
+
+export interface EstimateGuideRow {
+  code: string
+  name: string
+  isActive: number
+  latestSource: string | null // fund_estimate 最新一次采样的 source
+  latestPct: number | null
+  latestTime: string | null
+  holdingsDate: string | null // 最近季报报告期（T3 兜底是否可用）
+}
+
+/** 估值说明页数据：基金列表 + 最新估值来源 + 最近持仓报告期 */
+export async function estimateGuide(pool: Pool): Promise<EstimateGuideRow[]> {
+  const funds = await pool.query<{ fund_code: string; fund_name: string; is_active: number }>(
+    'SELECT fund_code, fund_name, is_active FROM fund_basic ORDER BY is_active DESC, fund_code'
+  )
+  const ests = await pool.query<{ fund_code: string; est_pct: string | null; est_time: Date; source: string }>(
+    `SELECT DISTINCT ON (fund_code) fund_code, est_pct, est_time, source
+     FROM fund_estimate
+     ORDER BY fund_code, est_time DESC`
+  )
+  const estMap = new Map(ests.rows.map((e) => [
+    e.fund_code,
+    { latestSource: e.source, latestPct: e.est_pct === null ? null : Number(e.est_pct), latestTime: e.est_time.toISOString() }
+  ]))
+  const holdings = await pool.query<{ fund_code: string; report_date: Date }>(
+    `SELECT DISTINCT ON (fund_code) fund_code, report_date
+     FROM fund_holdings
+     ORDER BY fund_code, report_date DESC`
+  )
+  const holdingsMap = new Map(holdings.rows.map((h) => [h.fund_code, h.report_date.toISOString().slice(0, 10)]))
+  return funds.rows.map((f) => ({
+    code: f.fund_code,
+    name: f.fund_name,
+    isActive: f.is_active,
+    ...(estMap.get(f.fund_code) ?? { latestSource: null, latestPct: null, latestTime: null }),
+    holdingsDate: holdingsMap.get(f.fund_code) ?? null
+  }))
+}

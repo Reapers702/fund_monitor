@@ -12,6 +12,7 @@ export const router = createRouter({
     { path: '/fund/:code', name: 'fund-detail', component: () => import('./views/FundDetailView.vue') },
     { path: '/position', name: 'position', component: PositionView },
     { path: '/news', name: 'news', component: NewsView },
-    { path: '/settings', name: 'settings', component: SettingsView }
+    { path: '/settings', name: 'settings', component: SettingsView },
+    { path: '/estimate-guide', name: 'estimate-guide', component: () => import('./views/EstimateGuideView.vue') }
   ]
 })

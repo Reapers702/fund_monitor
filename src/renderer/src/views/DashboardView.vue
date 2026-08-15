@@ -216,7 +216,7 @@ onBeforeUnmount(() => {
                 {{ fmtPct(f.estPct) }}
               </div>
               <div class="metric-sub">
-                {{ f.estSource === 'tracking_index' ? 'T1 跟踪指数' : f.estSource === 'theme_etf' ? 'T2 主题ETF' : '无估值' }}
+                {{ f.estSource === 'tracking_index' ? 'T1 跟踪指数' : f.estSource === 'theme_etf' ? 'T2 主题ETF' : f.estSource === 'holdings_weighted' ? 'T3 重仓股加权（基于季报）' : '无估值' }}
               </div>
             </div>
           </div>

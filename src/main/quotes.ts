@@ -6,7 +6,7 @@ import { createPool, ensureSchema } from './storage/db'
 import { saveStockDaily } from './storage/stockRepo'
 import { saveEstimate } from './storage/estimateRepo'
 import { stockKlines, stockQuote } from './crawler/market'
-import { estimateT1 } from './crawler/estimate'
+import { estimateT1, estimateT3 } from './crawler/estimate'
 import type { Pool } from 'pg'
 
 /** 本地日期 YYYY-MM-DD（行情按交易日，本机为国内时区） */
@@ -72,19 +72,19 @@ export async function runQuotesCore(pool: Pool): Promise<QuotesResult> {
     }
   })
 
-  // 3. 盘中估值（T1 跟踪指数 / T2 主题 ETF）
+  // 3. 盘中估值（T1 跟踪指数 / T2 主题 ETF / T3 重仓股加权）
   for (const f of funds.rows) {
     try {
-      const est = await estimateT1(f.fund_name)
+      const est = await estimateOneFund(pool, f)
       if (!est) continue
       const saved = await saveEstimate(pool, {
         fundCode: f.fund_code,
-        estTime: est.ts,
+        estTime: est.estTime,
         estNav: null,
-        estPct: est.pct,
+        estPct: est.estPct,
         source: est.source
       })
-      if (saved) result.estimates.push({ code: f.fund_code, name: est.indexName, source: est.source, pct: est.pct })
+      if (saved) result.estimates.push({ code: f.fund_code, name: est.indexName ?? '', source: est.source, pct: est.estPct })
     } catch (e) {
       result.errors.push({ code: f.fund_code, message: `估值: ${(e as Error).message}` })
     }
@@ -93,7 +93,42 @@ export async function runQuotesCore(pool: Pool): Promise<QuotesResult> {
   return result
 }
 
-/** 盘中高频估值采样：只对启用基金做 T1/T2 估值入库（不拉持仓股行情，避免高频骚扰） */
+/** 对单只基金做盘中估值：T1 跟踪指数 → T2 主题 ETF → T3 重仓股加权（主动型兜底）。返回估值结果或 null */
+async function estimateOneFund(
+  pool: Pool,
+  fund: { fund_code: string; fund_name: string }
+): Promise<{ estTime: Date; estPct: number | null; source: string; indexName?: string } | null> {
+  // T1/T2：按名称匹配跟踪指数/主题ETF
+  const est = await estimateT1(fund.fund_name)
+  if (est) {
+    return { estTime: est.ts, estPct: est.pct, source: est.source, indexName: est.indexName }
+  }
+
+  // T3：主动型——最近季报重仓股按权重加权
+  try {
+    const holdings = await pool.query<{ stock_code: string | null; stock_name: string | null; weight: string | null }>(
+      `SELECT stock_code, stock_name, weight FROM fund_holdings
+       WHERE fund_code = $1 AND report_date = (SELECT max(report_date) FROM fund_holdings WHERE fund_code = $1)
+       ORDER BY rank`,
+      [fund.fund_code]
+    )
+    const rows = holdings.rows.map((r) => ({
+      stockCode: r.stock_code,
+      stockName: r.stock_name,
+      weight: r.weight === null ? null : Number(r.weight)
+    }))
+    const t3 = await estimateT3(rows)
+    if (t3 && t3.pct !== null) {
+      return { estTime: t3.ts, estPct: t3.pct, source: t3.source, indexName: `重仓股加权（覆盖${t3.coveredWeight.toFixed(0)}%）` }
+    }
+  } catch (e) {
+    console.warn(`[quotes] ${fund.fund_code} T3 估算失败: ${(e as Error).message}`)
+  }
+
+  return null
+}
+
+/** 盘中高频估值采样：只对启用基金做 T1/T2/T3 估值入库（T3 需查持仓，频率由调度器控制） */
 export async function sampleEstimatesCore(pool: Pool): Promise<{ sampled: number; errors: number }> {
   const funds = await pool.query<{ fund_code: string; fund_name: string }>(
     'SELECT fund_code, fund_name FROM fund_basic WHERE is_active = 1 ORDER BY fund_code'
@@ -102,13 +137,13 @@ export async function sampleEstimatesCore(pool: Pool): Promise<{ sampled: number
   let errors = 0
   for (const f of funds.rows) {
     try {
-      const est = await estimateT1(f.fund_name)
+      const est = await estimateOneFund(pool, f)
       if (!est) continue
       const saved = await saveEstimate(pool, {
         fundCode: f.fund_code,
-        estTime: est.ts,
+        estTime: est.estTime,
         estNav: null,
-        estPct: est.pct,
+        estPct: est.estPct,
         source: est.source
       })
       if (saved) sampled++
@@ -151,7 +186,7 @@ export async function runQuotes(): Promise<number> {
   console.log(`[quotes] 基金 ${r.fundCount} 只，持仓股票 ${r.stockCount} 只`)
   console.log(`[quotes] 日 K 新增 ${r.klineAdded} 行，当日实时价已滚动（${todayStr()}）`)
   for (const e of r.estimates) {
-    const tag = e.source === 'tracking_index' ? 'T1' : 'T2'
+    const tag = e.source === 'tracking_index' ? 'T1' : e.source === 'theme_etf' ? 'T2' : 'T3'
     console.log(`[quotes] ${e.code} ${tag} ${e.name} 实时 ${e.pct !== null ? e.pct + '%' : 'N/A'}（新采样）`)
   }
   for (const er of r.errors) {

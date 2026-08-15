@@ -161,6 +161,11 @@ if (process.argv.includes('--check')) {
   const { writeFileSync } = require('fs') as typeof import('fs')
   app.whenReady().then(() => {
     const win = createWindow()
+    // 开发辅助：--viewport-height <px> 加高视口，便于整页截图（默认 900）
+    const vIdx = process.argv.indexOf('--viewport-height')
+    if (vIdx >= 0) {
+      win.setContentSize(1280, Number(process.argv[vIdx + 1]) || 900)
+    }
     registerIpcHandlers(win)
     win.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
@@ -170,7 +175,7 @@ if (process.argv.includes('--check')) {
           // 等 Vue 路由渲染（hashchange → 组件挂载）
           await new Promise((res) => setTimeout(res, 800))
           const curHash = await win.webContents.executeJavaScript('location.hash').catch(() => '')
-          if (process.argv.includes('--expand-form')) console.log('[screenshot] hash after route:', curHash)
+          console.log('[screenshot] hash:', curHash)
           // 开发验证：--expand-form 时点击"录入交易"按钮展开表单（持仓页截图用）
           if (process.argv.includes('--expand-form')) {
             await win.webContents
@@ -198,7 +203,9 @@ if (process.argv.includes('--check')) {
             .executeJavaScript(`({
               adviceBtn: [...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(t => t && t.includes('分析')),
               adviceEmpty: document.querySelector('.advice-card .n-empty')?.textContent ?? null,
-              adviceCount: document.querySelectorAll('.advice-item').length
+              adviceCount: document.querySelectorAll('.advice-item').length,
+              guideRows: document.querySelectorAll('.funds-table tbody tr').length,
+              guideTags: [...document.querySelectorAll('.funds-table tbody tr .n-tag')].map(t => t.textContent?.trim()).filter(Boolean)
             })`)
             .catch(() => null)
           if (diag) console.log('[screenshot] diag:', JSON.stringify(diag))

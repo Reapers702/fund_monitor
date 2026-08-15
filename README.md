@@ -18,18 +18,19 @@
 
 ## 功能
 
-- **我的基金**：添加/停用自选基金，卡片展示最新净值、当日涨跌、盘中估值（T1 跟踪指数实时）
+- **我的基金**：添加/停用自选基金，卡片展示最新净值、当日涨跌、盘中估值（T1 跟踪指数 / T2 主题ETF / T3 重仓股加权）
 - **基金详情**：净值走势 ECharts（归一化）+ 盘中估值采样叠加、重仓股近 10 日表现、AI 建议区
 - **我的持仓**：买卖录入/删除，移动加权平均成本与盈亏汇总，费率设置
 - **新闻流**：只读 `ai_fund.raw_news` 时间线，情绪色标 + LLM 主题标签 + 关键词筛选（60s 自动轮询）
 - **AI 分析**：DeepSeek 生成建议（写 `ds_advice`），非 hold 触发桌面通知
 - **设置**：DeepSeek Key / 抓取频率 / 通道写回 config.json
+- **估值说明**：设置后独立页面，说明 T1/T2/T3 三种估值手段的原理与精度，并列出每只自选基金当前的估值方式
 
 ## 架构说明
 
 - **新闻不抓取**：财联社采集 + LLM 增强由另一套 24h 运行的程序完成，写入同一 PG 实例的 `ai_fund` 库 `raw_news` 表（含 `summary`/`sentiment`/`llm_tags` 字段），本应用仅通过 `config.aiFund` 只读连接消费。
 - **双库并存**：本应用数据在 `fund_monitor` 库（8 张表，启动自动建表幂等）；新闻在 `ai_fund` 库。两者通常同实例同凭证、仅库名不同。
-- **盘中估值 T1**：按基金名称关键词匹配跟踪指数（INDEX_RULES 17 条）→ push2 实时涨跌幅 → 写 `fund_estimate`。主动型基金落 T2（隐藏窗口页面估值，见 M8 打磨项）。
+- **盘中估值三级降级**：T1 按基金名称关键词匹配跟踪指数（INDEX_RULES 17 条）→ push2 实时涨跌幅；T2 行业/主题型基金匹配同主题 ETF（ETF_RULES 20 条，fundgz 页面估值接口已下线，用主题 ETF 替代）；T3 主动型基金（无规则命中）用最近季报重仓股实时涨跌按权重加权估算（误差大仅参考，界面标注"基于季报估算"）。全部写 `fund_estimate`（source 区分），详见"估值说明"页。
 
 ## 环境要求
 
@@ -68,7 +69,7 @@ npm run build:win
 |---|---|
 | `electron . --check` | 校验配置 + PG 连通 + 自动建表（`npm run check`） |
 | `electron . --fund <code>` | 添加/同步单只基金（详情+净值+持仓） |
-| `electron . --quotes` | 持仓股行情 + T1 盘中估值采样（`npm run quotes`） |
+| `electron . --quotes` | 持仓股行情 + T1/T2/T3 盘中估值采样（`npm run quotes`） |
 | `electron . --news` | 验证 ai_fund 新闻只读链路（`npm run news`） |
 | `electron . --analyze <code>` | 单基金 AI 分析（`npm run analyze -- <code>`） |
 | `electron . --analyze-all` | 全部自选基金 AI 分析（`npm run analyze-all`） |
@@ -85,7 +86,7 @@ npm run build:win
 |---|---|
 | `fund_basic` | 基金基础信息（名称/经理/托管/成立日） |
 | `fund_nav_daily` | 每日净值（UNIQUE fund_code+trade_date 幂等） |
-| `fund_estimate` | 盘中估值采样（T1 跟踪指数实时） |
+| `fund_estimate` | 盘中估值采样（T1 跟踪指数 / T2 主题ETF / T3 重仓股加权，source 区分） |
 | `fund_holdings` | 季度重仓股（报告期+权重） |
 | `stock_daily` | 个股日线/实时行情 |
 | `ds_advice` | DeepSeek 建议留痕（含 response_raw） |
@@ -117,7 +118,7 @@ npm run build:win
 ```
 src/
 ├── main/                  # 主进程
-│   ├── index.ts           # 入口 + CLI 分支（--check/--fund/--quotes/--news/--analyze/--screenshot）
+│   ├── index.ts           # 入口 + CLI 分支（--check/--fund/--quotes/--news/--analyze/--screenshot/--calendar-test）
 │   ├── ipc.ts             # IPC 处理器（funds/position/news/advice/config）
 │   ├── config.ts          # 配置（config.json + .env 回退）
 │   ├── crawler/           # 抓取（httpClient/pageFetcher/eastmoney/danjuan/market/estimate）
@@ -127,7 +128,7 @@ src/
 │   ├── storage/           # pg 连接/建表/各表读写 + queries 聚合查询层
 │   └── notifier.ts        # Electron 桌面通知
 ├── preload/               # contextBridge（api.d.ts 共享类型）
-└── renderer/src/          # Vue3 前端（views: Dashboard/FundDetail/Position/News/Settings）
+└── renderer/src/          # Vue3 前端（views: Dashboard/FundDetail/Position/News/Settings/EstimateGuide）
 ```
 
 ## 开发命令
@@ -148,10 +149,10 @@ npm run build:win    # NSIS 安装包
 - [x] ~~**自动更新**：`electron-builder.yml` 的 publish url 仍是 `example.com` 占位，接入 electron-updater 后支持版本推送~~（暂不考虑，日后再说）
 - [x] ~~**打包代码签名**：当前 NSIS 安装包未签名，Windows SmartScreen 会有未知发布者警告~~（暂不考虑，日后再说）
 - [ ] **日志保留策略**：日志按日滚动但无限累积，可加"仅保留最近 N 天"自动清理
-- [ ] **主动型基金页面估值（T3）**：161005 等无跟踪标的的主动型基金目前无盘中估值；天天基金 `fundgz` 接口已下线，需找替代数据源
+- [x] **主动型基金盘中估值（T3）**：161005 等无跟踪标的的主动型基金，用最近季报前十大重仓股实时涨跌按权重加权估算（误差较大仅参考，页面标注"基于季报估算"；`fundgz` 已下线，未走页面估值方案）
 - [ ] **可选数据源**：雪球个股行情（需会话 cookie，隐藏窗口种 cookie 方案）等
 
-> 已完成：**法定节假日交易日历**（腾讯日K交易日 + 百度法定节假日 + 静态休市表三级降级，见 `scheduler/tradingCalendar.ts`）。
+> 已完成：**法定节假日交易日历**（腾讯日K交易日 + 百度法定节假日 + 静态休市表三级降级，见 `scheduler/tradingCalendar.ts`）；**估值说明页**（T1/T2/T3 方法说明 + 各基金当前方式，见"估值说明"菜单）。
 
 ## 免责声明
 

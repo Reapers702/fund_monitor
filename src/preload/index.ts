@@ -9,6 +9,7 @@ const api: FundApi = {
   fundsList: (): Promise<FundCard[]> => ipcRenderer.invoke('funds:list'),
   fundsAdd: (code: string): Promise<FundSyncResult> => ipcRenderer.invoke('funds:add', code),
   fundsToggle: (code: string, active: boolean): Promise<void> => ipcRenderer.invoke('funds:toggle', code, active),
+  estimateGuide: (): Promise<EstimateGuideFund[]> => ipcRenderer.invoke('estimate:guide'),
 
   fundDetail: (code: string, days = 120): Promise<FundDetail> => ipcRenderer.invoke('fund:detail', code, days),
   adviceAnalyze: (code: string): Promise<AdviceRunResult> => ipcRenderer.invoke('advice:analyze', code),

@@ -11,6 +11,7 @@ const activeKey = computed(() => {
   if (route.path.startsWith('/position')) return 'position'
   if (route.path.startsWith('/news')) return 'news'
   if (route.path.startsWith('/settings')) return 'settings'
+  if (route.path.startsWith('/estimate-guide')) return 'estimate-guide'
   return 'dashboard'
 })
 
@@ -18,7 +19,8 @@ const menuOptions = [
   { label: '我的基金', key: 'dashboard' },
   { label: '我的持仓', key: 'position' },
   { label: '新闻流', key: 'news' },
-  { label: '设置', key: 'settings' }
+  { label: '设置', key: 'settings' },
+  { label: '估值说明', key: 'estimate-guide' }
 ]
 
 function onMenuSelect(key: string): void {

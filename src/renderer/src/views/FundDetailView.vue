@@ -187,7 +187,7 @@ watch(
             <n-descriptions-item label="估值来源">
               <n-tag
                 size="tiny"
-                :type="detail.estimate[detail.estimate.length - 1]?.source === 'tracking_index' ? 'success' : 'info'"
+                :type="detail.estimate[detail.estimate.length - 1]?.source === 'tracking_index' ? 'success' : detail.estimate[detail.estimate.length - 1]?.source === 'theme_etf' ? 'info' : 'warning'"
                 :bordered="false"
               >
                 {{
@@ -195,7 +195,9 @@ watch(
                     ? '跟踪指数 T1'
                     : detail.estimate[detail.estimate.length - 1]?.source === 'theme_etf'
                       ? '主题ETF T2'
-                      : '无估值'
+                      : detail.estimate[detail.estimate.length - 1]?.source === 'holdings_weighted'
+                        ? '重仓股加权 T3（基于季报估算）'
+                        : '无估值'
                 }}
               </n-tag>
             </n-descriptions-item>

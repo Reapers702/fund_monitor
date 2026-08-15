@@ -9,8 +9,10 @@ import {
   estimateSeries,
   latestHoldings,
   fundBasic,
-  adviceList
+  adviceList,
+  estimateGuide
 } from './storage/queries'
+import { findTrackingIndex } from './crawler/estimate'
 import { syncFund } from './fund'
 import { analyzeFund, saveAdvice, todayStr } from './analyzer/analyze'
 import { notifyAdvice } from './notifier'
@@ -160,6 +162,33 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     } finally {
       await pool.end().catch(() => {})
       await aiFundPool.end().catch(() => {})
+    }
+  })
+
+  // 估值说明页：各基金最新估值来源 + 名称规则匹配结果（不拉实时行情）
+  ipcMain.handle('estimate:guide', async (): Promise<EstimateGuideFund[]> => {
+    const cfg = loadConfig()
+    const pool = createPool(cfg)
+    try {
+      const rows = await estimateGuide(pool)
+      return rows.map((r) => {
+        const match = findTrackingIndex(r.name)
+        return {
+          code: r.code,
+          name: r.name,
+          isActive: r.isActive,
+          latestSource: r.latestSource,
+          latestPct: r.latestPct,
+          latestTime: r.latestTime,
+          holdingsDate: r.holdingsDate,
+          match: match ? { source: match.source, name: match.name, secid: match.secid } : null
+        }
+      })
+    } catch (e) {
+      console.error('[ipc] estimate:guide 失败:', (e as Error).message)
+      throw e
+    } finally {
+      await pool.end().catch(() => {})
     }
   })
 

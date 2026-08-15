@@ -217,6 +217,20 @@ interface SchedulerStatus {
   lastLog: string
 }
 
+// ---------- 估值说明页（estimate:guide 返回） ----------
+
+// 基金名称命中估值规则的结果（tracking_index / theme_etf；未命中则为 null → T3 兜底或无估值）
+interface EstimateGuideFund {
+  code: string
+  name: string
+  isActive: number
+  latestSource: string | null // 最新一次采样的 source：tracking_index / theme_etf / holdings_weighted
+  latestPct: number | null
+  latestTime: string | null
+  holdingsDate: string | null // 最近季报报告期（T3 可用性）
+  match: { source: 'tracking_index' | 'theme_etf'; name: string; secid: string } | null
+}
+
 // 渲染进程可用的业务 API（与 src/main/ipc.ts 的 handler 一一对应）
 interface FundApi {
   ping: () => Promise<string>
@@ -224,6 +238,7 @@ interface FundApi {
   fundsList: () => Promise<FundCard[]>
   fundsAdd: (code: string) => Promise<FundSyncResult>
   fundsToggle: (code: string, active: boolean) => Promise<void>
+  estimateGuide: () => Promise<EstimateGuideFund[]>
   fundDetail: (code: string, days?: number) => Promise<FundDetail>
   adviceAnalyze: (code: string) => Promise<AdviceRunResult>
   quotesRun: () => Promise<QuotesRunResult>
