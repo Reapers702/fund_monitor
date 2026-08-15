@@ -70,18 +70,20 @@ npm run build:win
 
 ## 命令行工具（CLI 模式）
 
-| 命令 | 说明 |
-|---|---|
-| `electron . --check` | 校验配置 + PG 连通 + 自动建表（`npm run check`） |
-| `electron . --fund <code>` | 添加/同步单只基金（详情+净值+持仓） |
-| `electron . --quotes` | 持仓股行情 + T1/T2/T3 盘中估值采样（`npm run quotes`） |
-| `electron . --news` | 验证 ai_fund 新闻只读链路（`npm run news`） |
-| `electron . --analyze <code>` | 单基金 AI 分析（`npm run analyze -- <code>`） |
-| `electron . --analyze-all` | 全部自选基金 AI 分析（`npm run analyze-all`） |
-| `electron . --ai-test` | 验证 DeepSeek 链路（配置/连通/一次对话） |
-| `electron . --calendar-test` | 交易日历自检（三级降级：腾讯日K → 百度节假日 → 静态表） |
-| `electron . --page-test <url>` | 隐藏窗口抓页验证 |
-| `electron . --screenshot <path> [--route <hash>] [--viewport-height <px>]` | 开发辅助：加载页面截图（加高视口截整页） |
+> 日常使用 **GUI 即可**——所有功能都有页面入口（添加基金 / 刷新行情 / AI 分析在"我的基金"页，单只分析在基金详情页）。CLI 主要用于**首次部署校验、批量补数据、脚本化定时任务和调试**；带 `npm run` 前缀的是等价快捷方式。
+
+| 命令 | 用途 | 日常使用 |
+|---|---|---|
+| `electron . --check`（`npm run check`） | 校验配置 + PG 连通 + 自动建表（首次部署跑一次） | 基本不用 |
+| `electron . --fund <code>`（`npm run fund -- <code>`） | 把某只基金的数据同步入库（详情+历史净值全量补种+季度持仓），**不加入自选** | 加自选请用 GUI"我的基金"输入代码；CLI 适合脚本批量补数据 |
+| `electron . --quotes`（`npm run quotes`） | 持仓股行情（日K补种+当日实时价）+ 盘中估值采样（T1/T2/T3） | 与 GUI"刷新行情/估值"按钮同一核心，日常由后台调度器自动采样，无需手动跑 |
+| `electron . --news`（`npm run news`） | 验证 ai_fund 新闻只读链路 | 基本不用 |
+| `electron . --analyze <code>`（`npm run analyze -- <code>`） | 单只基金 AI 分析（按 guanxin 用户持仓） | 与 GUI 基金详情页"立即分析"等价，日常用 GUI |
+| `electron . --analyze-all`（`npm run analyze-all`） | 所有用户 × 各自自选基金 AI 分析 | 与 GUI"全部 AI 分析"按钮等价，日常由后台调度器 15:35 自动执行 |
+| `electron . --ai-test` | 验证 DeepSeek 链路（配置/连通/一次对话） | 调试用 |
+| `electron . --calendar-test` | 交易日历自检（三级降级：腾讯日K → 百度节假日 → 静态表） | 调试用 |
+| `electron . --page-test <url>` | 隐藏窗口抓页验证 | 调试用 |
+| `electron . --screenshot <path> [--route <hash>] [--viewport-height <px>]` | 开发辅助：加载页面截图（加高视口截整页） | 开发用 |
 
 > 注：Windows Git Bash 下 `--route "/"` 需加 `MSYS_NO_PATHCONV=1` 前缀，否则 `/` 会被转成路径。
 
