@@ -85,7 +85,13 @@ function onMenuSelect(key: string): void {
 }
 
 .app-menu {
-  width: 280px;
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+.app-menu :deep(.n-menu-menu-content) {
+  justify-content: flex-end;
 }
 
 .app-content {
