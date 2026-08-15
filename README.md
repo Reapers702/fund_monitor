@@ -145,12 +145,13 @@ npm run build:win    # NSIS 安装包
 当前 M1-M8 主体已完成并可用，以下为后续可选项（按优先级大致排序）：
 
 - [ ] **托盘 + 开机自启**：监控类应用常驻后台，最小化到系统托盘；可配置开机自启（配合 scheduler 自动采集）
-- [ ] **自动更新**：`electron-builder.yml` 的 publish url 仍是 `example.com` 占位，接入 electron-updater 后支持版本推送
-- [ ] **打包代码签名**：当前 NSIS 安装包未签名，Windows SmartScreen 会有未知发布者警告
-- [ ] **法定节假日交易日历**：scheduler 目前只判断周末，节假日（春节/国庆等休市日）会空跑；可接入交易日历数据源
+- [x] ~~**自动更新**：`electron-builder.yml` 的 publish url 仍是 `example.com` 占位，接入 electron-updater 后支持版本推送~~（暂不考虑，日后再说）
+- [x] ~~**打包代码签名**：当前 NSIS 安装包未签名，Windows SmartScreen 会有未知发布者警告~~（暂不考虑，日后再说）
 - [ ] **日志保留策略**：日志按日滚动但无限累积，可加"仅保留最近 N 天"自动清理
 - [ ] **主动型基金页面估值（T3）**：161005 等无跟踪标的的主动型基金目前无盘中估值；天天基金 `fundgz` 接口已下线，需找替代数据源
 - [ ] **可选数据源**：雪球个股行情（需会话 cookie，隐藏窗口种 cookie 方案）等
+
+> 已完成：**法定节假日交易日历**（腾讯日K交易日 + 百度法定节假日 + 静态休市表三级降级，见 `scheduler/tradingCalendar.ts`）。
 
 ## 免责声明
 
