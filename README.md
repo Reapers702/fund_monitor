@@ -30,7 +30,9 @@
 
 - **新闻不抓取**：财联社采集 + LLM 增强由另一套 24h 运行的程序完成，写入同一 PG 实例的 `ai_fund` 库 `raw_news` 表（含 `summary`/`sentiment`/`llm_tags` 字段），本应用仅通过 `config.aiFund` 只读连接消费。
 - **双库并存**：本应用数据在 `fund_monitor` 库（8 张表，启动自动建表幂等）；新闻在 `ai_fund` 库。两者通常同实例同凭证、仅库名不同。
-- **盘中估值三级降级**：T1 按基金名称关键词匹配跟踪指数（INDEX_RULES 17 条）→ push2 实时涨跌幅；T2 行业/主题型基金匹配同主题 ETF（ETF_RULES 20 条，fundgz 页面估值接口已下线，用主题 ETF 替代）；T3 主动型基金（无规则命中）用最近季报重仓股实时涨跌按权重加权估算（误差大仅参考，界面标注"基于季报估算"）。全部写 `fund_estimate`（source 区分），详见"估值说明"页。
+- **盘中估值三级降级**：T1 按基金名称关键词匹配跟踪指数（INDEX_RULES 17 条）→ 指数实时涨跌幅；T2 行业/主题型基金匹配同主题 ETF（ETF_RULES 20 条，fundgz 页面估值接口已下线，用主题 ETF 替代）；T3 主动型基金（无规则命中）用最近季报重仓股实时涨跌按权重加权估算（误差大仅参考，界面标注"基于季报估算"）。全部写 `fund_estimate`（source 区分），详见"估值说明"页。
+- **行情多源降级**：个股/指数行情主 push2/push2his（东财），连接被拒或持续失败自动熔断 5 分钟后走腾讯 `qt.gtimg` / `web.ifzq` 降级源（`crawler/market.ts`）。
+- **后台调度器**：主窗口启动后常驻（`scheduler.ts`），按交易时段自动执行——盘中（9:30-11:30 / 13:00-15:00）每 `estimateIntervalSeconds` 做一轮估值采样；盘后（15:30 起）按 `navCheckMinutes` 轮询当日净值直至出现或 23:00；收盘后（`analyzer.minutes`，默认 15:35）自动跑全部基金 AI 分析并推送非 hold 通知。任务均带防重跑标记，非交易日自动跳过（交易日历三级降级，见 `scheduler/tradingCalendar.ts`）。
 
 ## 环境要求
 
@@ -73,8 +75,10 @@ npm run build:win
 | `electron . --news` | 验证 ai_fund 新闻只读链路（`npm run news`） |
 | `electron . --analyze <code>` | 单基金 AI 分析（`npm run analyze -- <code>`） |
 | `electron . --analyze-all` | 全部自选基金 AI 分析（`npm run analyze-all`） |
+| `electron . --ai-test` | 验证 DeepSeek 链路（配置/连通/一次对话） |
+| `electron . --calendar-test` | 交易日历自检（三级降级：腾讯日K → 百度节假日 → 静态表） |
 | `electron . --page-test <url>` | 隐藏窗口抓页验证 |
-| `electron . --screenshot <path> [--route <hash>]` | 开发辅助：加载页面截图 |
+| `electron . --screenshot <path> [--route <hash>] [--viewport-height <px>]` | 开发辅助：加载页面截图（加高视口截整页） |
 
 > 注：Windows Git Bash 下 `--route "/"` 需加 `MSYS_NO_PATHCONV=1` 前缀，否则 `/` 会被转成路径。
 
@@ -118,7 +122,7 @@ npm run build:win
 ```
 src/
 ├── main/                  # 主进程
-│   ├── index.ts           # 入口 + CLI 分支（--check/--fund/--quotes/--news/--analyze/--screenshot/--calendar-test）
+│   ├── index.ts           # 入口 + CLI 分支（--check/--fund/--quotes/--news/--analyze/--analyze-all/--ai-test/--calendar-test/--screenshot）
 │   ├── ipc.ts             # IPC 处理器（funds/position/news/advice/config）
 │   ├── config.ts          # 配置（config.json + .env 回退）
 │   ├── crawler/           # 抓取（httpClient/pageFetcher/eastmoney/danjuan/market/estimate）
@@ -136,7 +140,7 @@ src/
 ```bash
 npm run dev          # 开发模式（HMR）
 npm run typecheck    # TS 类型检查（node + web）
-npm test             # vitest 单测（持仓算法 / LLM 解析 / 交易时段判断）
+npm test             # vitest 单测（持仓算法 / LLM 解析 / 交易时段 / 交易日历 / 估值规则）
 npm run build        # 类型检查 + 构建
 npm run build:win    # NSIS 安装包
 ```
