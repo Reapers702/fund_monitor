@@ -1,7 +1,8 @@
 // 后台调度器（计划书 §7.3）：主窗口启动后常驻，按交易时段自动执行
-//  盘中（9:30-11:30, 13:00-15:00）：每 estimateIntervalSeconds 估值采样（T1/T2）
-//  盘后（15:30 起）：净值增量（每 navCheckMinutes 轮询至当日净值出现或 23:00）
-//  收盘后（analyzer.minutes，默认 35 → 15:35）：全部基金 AI 分析 + 非 hold 通知
+//  盘中（9:30-11:30, 13:00-15:00，仅交易日）：每 estimateIntervalSeconds 估值采样（T1/T2/T3）
+//  盘后（15:30 起，交易日与非交易日都跑）：净值增量（每 navCheckMinutes 轮询至目标交易日净值出现或 23:00；
+//    非交易日目标=最近交易日，覆盖"周五净值周六凌晨公布"场景）
+//  收盘后（analyzer.minutes，默认 35 → 15:35，仅交易日）：全部基金 AI 分析 + 非 hold 通知
 // 所有任务均带防重跑标记；交易日判断见 scheduler/time.ts
 import { loadConfig } from './config'
 import { createPool, createAiFundPool, ensureSchema } from './storage/db'
@@ -12,7 +13,7 @@ import { latestNavDate } from './storage/fundRepo'
 import { cleanupOldEstimates, recordEstimateDiffs } from './storage/estimateRepo'
 import { todayStr } from './quotes'
 import { isIntraday, isAfterClose, nowMinutes } from './scheduler/time'
-import { isTradingDay as isTradingDayCal, isTradingDayStatic } from './scheduler/tradingCalendar'
+import { isTradingDay as isTradingDayCal, latestTradingDayStr } from './scheduler/tradingCalendar'
 import { logInfo, logWarn, logError } from './logger'
 import type { Pool } from 'pg'
 
@@ -29,8 +30,9 @@ export interface SchedulerState {
 let state: SchedulerState = { running: false, lastEstimateAt: 0, navTodayDone: false, adviceTodayDone: false, lastLog: '未启动' }
 let timer: NodeJS.Timeout | null = null
 
-/** 今天是否已确认当日净值（所有用户自选基金并集都出净值才算，多用户 M9） */
-async function navTodayConfirmed(pool: Pool): Promise<boolean> {
+/** 是否已确认目标交易日净值（所有用户自选基金并集都出净值才算，多用户 M9）。
+ *  交易日目标=today；非交易日目标=最近交易日（周五净值周六凌晨公布是常态，周六盘后也要补） */
+async function navTodayConfirmed(pool: Pool, targetDate: string): Promise<boolean> {
   const funds = await pool.query<{ fund_code: string }>(
     `SELECT DISTINCT f.fund_code
      FROM user_fund uf JOIN fund_basic f ON f.fund_code = uf.fund_code
@@ -39,7 +41,7 @@ async function navTodayConfirmed(pool: Pool): Promise<boolean> {
   if (funds.rows.length === 0) return true // 无自选基金视为完成
   for (const f of funds.rows) {
     const d = await latestNavDate(pool, f.fund_code)
-    if (!d || d < todayStr()) return false
+    if (!d || d < targetDate) return false
   }
   return true
 }
@@ -66,19 +68,17 @@ async function runNavDaily(pool: Pool): Promise<{ done: number; total: number }>
 
 async function tick(): Promise<void> {
   const cfg = loadConfig()
-  // 交易日判断：腾讯交易日历为主（含节假日/调休），接口失败降级静态休市表
-  if (!(await isTradingDayCal())) {
-    state.lastLog = '非交易日，跳过'
-    return
-  }
+  // 交易日判断：腾讯交易日历为主（含节假日/调休），接口失败降级静态休市表。
+  // 估值采样/AI 分析仅交易日执行；净值增量交易日与非交易日盘后都执行（T+1 公布，周五净值周六凌晨出）
+  const trading = await isTradingDayCal()
   const m = nowMinutes()
   const pool = createPool(cfg)
 
   try {
     await ensureSchema(pool)
 
-    // 1. 盘中估值采样（每 estimateIntervalSeconds 一次）
-    if (isIntraday(m)) {
+    // 1. 盘中估值采样（每 estimateIntervalSeconds 一次；仅交易日）
+    if (trading && isIntraday(m)) {
       const intervalMs = (cfg.fetcher.estimateIntervalSeconds || 30) * 1000
       if (Date.now() - state.lastEstimateAt >= intervalMs) {
         state.lastEstimateAt = Date.now()
@@ -90,21 +90,24 @@ async function tick(): Promise<void> {
         }
         if (r.errors > 0) logWarn(`[scheduler] 估值采样失败 ${r.errors} 条`)
       }
-    } else if (isAfterClose(m)) {
-      // 2. 盘后净值增量（15:30 起，每 navCheckMinutes 轮询直至当日净值出现）
+    }
+
+    // 2. 盘后净值增量（15:30 起，每 navCheckMinutes 轮询直至目标交易日净值出现；非交易日补最近交易日）
+    if (isAfterClose(m)) {
       if (!state.navTodayDone) {
         if (m <= 23 * 60) {
+          const target = trading ? todayStr() : latestTradingDayStr()
           const r = await runNavDaily(pool)
-          const confirmed = await navTodayConfirmed(pool)
-          state.lastLog = `净值增量 ${r.done}/${r.total}${confirmed ? '（当日净值已确认）' : '（等待公布，稍后重试）'}`
+          const confirmed = await navTodayConfirmed(pool, target)
+          state.lastLog = `净值增量 ${r.done}/${r.total}${confirmed ? `（${target} 净值已确认）` : '（等待公布，稍后重试）'}`
           console.log(`[scheduler] ${state.lastLog}`)
           logInfo(`[scheduler] ${state.lastLog}`)
           if (confirmed || m >= 22 * 60) state.navTodayDone = true
-          // 当日净值确认后：记录"盘中估值 vs 实际净值"误差（T3 可信度验证），并清理过期估值（保留最近 30 天）
+          // 净值确认后：记录"盘中估值 vs 实际净值"误差（T3 可信度验证），并清理过期估值（保留最近 30 天）
           if (confirmed) {
             try {
-              const diffRows = await recordEstimateDiffs(pool, todayStr())
-              if (diffRows > 0) logInfo(`[scheduler] 记录估值误差 ${diffRows} 条（${todayStr()}）`)
+              const diffRows = await recordEstimateDiffs(pool, target)
+              if (diffRows > 0) logInfo(`[scheduler] 记录估值误差 ${diffRows} 条（${target}）`)
             } catch (e) {
               logWarn(`[scheduler] 估值误差记录失败: ${(e as Error).message}`)
             }
@@ -120,8 +123,8 @@ async function tick(): Promise<void> {
         }
       }
 
-      // 3. 收盘后 AI 分析（analyzer.minutes 分钟时刻，默认 35 → 15:35；当日只跑一次）
-      if (!state.adviceTodayDone && m >= 15 * 60 + (Number(cfg.analyzer.minutes) || 35)) {
+      // 3. 收盘后 AI 分析（analyzer.minutes 分钟时刻，默认 35 → 15:35；仅交易日，当日只跑一次）
+      if (trading && !state.adviceTodayDone && m >= 15 * 60 + (Number(cfg.analyzer.minutes) || 35)) {
         const aiFundPool = createAiFundPool(cfg)
         try {
           const r = await runAnalyzeAllCore(pool, aiFundPool)
@@ -136,6 +139,13 @@ async function tick(): Promise<void> {
           await aiFundPool.end().catch(() => {})
         }
       }
+
+      // 非交易日盘后且无事可做时给出状态（避免误以为调度停摆）
+      if (!trading && state.navTodayDone) {
+        state.lastLog = '非交易日，净值已是最新'
+      }
+    } else if (!trading) {
+      state.lastLog = '非交易日'
     }
   } catch (e) {
     console.error(`[scheduler] tick 异常: ${(e as Error).message}`)

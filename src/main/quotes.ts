@@ -7,6 +7,7 @@ import { saveStockDaily } from './storage/stockRepo'
 import { saveEstimate } from './storage/estimateRepo'
 import { stockKlines, stockQuote } from './crawler/market'
 import { estimateT1, estimateT3 } from './crawler/estimate'
+import { syncFund } from './fund'
 import type { Pool } from 'pg'
 
 /** 本地日期 YYYY-MM-DD（行情按交易日，本机为国内时区） */
@@ -91,6 +92,16 @@ export async function runQuotesCore(pool: Pool): Promise<QuotesResult> {
       if (saved) result.estimates.push({ code: f.fund_code, name: est.indexName ?? '', source: est.source, pct: est.estPct })
     } catch (e) {
       result.errors.push({ code: f.fund_code, message: `估值: ${(e as Error).message}` })
+    }
+  }
+
+  // 4. 净值增量（顺带补齐 T+1 公布的净值；幂等，无新数据则 0 条）。
+  //    与 GUI"刷新行情/估值"按钮同链路，保证手动刷新时缺口立即补上（周五净值周六凌晨公布场景）
+  for (const f of funds.rows) {
+    try {
+      await syncFund(pool, f.fund_code, () => {})
+    } catch (e) {
+      result.errors.push({ code: f.fund_code, message: `净值增量: ${(e as Error).message}` })
     }
   }
 

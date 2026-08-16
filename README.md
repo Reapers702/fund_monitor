@@ -35,7 +35,7 @@
 - **多用户数据面**：`app_user`（用户）+ `user_fund`（用户自选基金，含启用/停用）+ 用户级列（`fund_trade.user_id` / `ds_advice.user_id` / `fund_profile` 按 user_id）；基金数据（`fund_basic`/净值/估值/重仓股/行情）无用户维度全局共享。历史数据已迁移至默认用户 **guanxin**。当前用户持久化在 config.json `currentUserId`。
 - **盘中估值三级降级**：T1 按基金名称关键词匹配跟踪指数（INDEX_RULES 17 条）→ 指数实时涨跌幅；T2 行业/主题型基金匹配同主题 ETF（ETF_RULES 20 条，fundgz 页面估值接口已下线，用主题 ETF 替代）；T3 主动型基金（无规则命中）用最近季报重仓股实时涨跌按权重加权估算（误差大仅参考，界面标注"基于季报估算"）。全部写 `fund_estimate`（source 区分），详见"估值说明"页。
 - **行情多源降级**：个股/指数行情主 push2/push2his（东财），连接被拒或持续失败自动熔断 5 分钟后走腾讯 `qt.gtimg` / `web.ifzq` 降级源（`crawler/market.ts`）。
-- **后台调度器**：主窗口启动后常驻（`scheduler.ts`），按交易时段自动执行——盘中（9:30-11:30 / 13:00-15:00）每 `estimateIntervalSeconds` 做一轮估值采样；盘后（15:30 起）按 `navCheckMinutes` 轮询当日净值直至出现或 23:00；收盘后（`analyzer.minutes`，默认 15:35）自动跑全部基金 AI 分析并推送非 hold 通知。任务均带防重跑标记，非交易日自动跳过（交易日历三级降级，见 `scheduler/tradingCalendar.ts`）。
+- **后台调度器**：主窗口启动后常驻（`scheduler.ts`），按交易时段自动执行——盘中（9:30-11:30 / 13:00-15:00，仅交易日）每 `estimateIntervalSeconds` 做一轮估值采样；盘后（15:30 起，交易日与非交易日都跑）按 `navCheckMinutes` 轮询净值直至出现或 23:00（非交易日目标为最近交易日，覆盖"周五净值周六凌晨公布"场景）；收盘后（`analyzer.minutes`，默认 15:35，仅交易日）自动跑全部基金 AI 分析并推送非 hold 通知。任务均带防重跑标记；估值采样/AI 分析跳过非交易日（交易日历三级降级，见 `scheduler/tradingCalendar.ts`）。
 
 ## 环境要求
 
@@ -76,7 +76,7 @@ npm run build:win
 |---|---|---|
 | `electron . --check`（`npm run check`） | 校验配置 + PG 连通 + 自动建表（首次部署跑一次） | 基本不用 |
 | `electron . --fund <code>`（`npm run fund -- <code>`） | 把某只基金的数据同步入库（详情+历史净值全量补种+季度持仓），**不加入自选** | 加自选请用 GUI"我的基金"输入代码；CLI 适合脚本批量补数据 |
-| `electron . --quotes`（`npm run quotes`） | 持仓股行情（日K补种+当日实时价）+ 盘中估值采样（T1/T2/T3） | 与 GUI"刷新行情/估值"按钮同一核心，日常由后台调度器自动采样，无需手动跑 |
+| `electron . --quotes`（`npm run quotes`） | 持仓股行情（日K补种+当日实时价）+ 盘中估值采样（T1/T2/T3）+ 净值增量（补 T+1 公布的净值） | 与 GUI"刷新行情/估值"按钮同一核心（也顺带补净值），日常由后台调度器自动采样，无需手动跑 |
 | `electron . --news`（`npm run news`） | 验证 ai_fund 新闻只读链路 | 基本不用 |
 | `electron . --analyze <code>`（`npm run analyze -- <code>`） | 单只基金 AI 分析（按 guanxin 用户持仓） | 与 GUI 基金详情页"立即分析"等价，日常用 GUI |
 | `electron . --analyze-all`（`npm run analyze-all`） | 所有用户 × 各自自选基金 AI 分析 | 与 GUI"全部 AI 分析"按钮等价，日常由后台调度器 15:35 自动执行 |

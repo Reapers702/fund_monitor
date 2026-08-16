@@ -173,3 +173,17 @@ export function isTradingDayStatic(d = new Date()): boolean {
   if (day === 0 || day === 6) return false
   return !STATIC_SET.has(dateStr(d))
 }
+
+/**
+ * 最近一个交易日 YYYY-MM-DD：从给定日期往前找（最多回退 14 天，找不到返回当天）。
+ * 用静态表判断，无网络开销；用于"非交易日盘后补净值"的目标日期（周五净值周六凌晨公布场景）。
+ */
+export function latestTradingDayStr(from = new Date()): string {
+  const d = new Date(from)
+  for (let i = 0; i < 14; i++) {
+    const ds = dateStr(d)
+    if (isTradingDayStatic(d)) return ds
+    d.setDate(d.getDate() - 1)
+  }
+  return dateStr(from)
+}
