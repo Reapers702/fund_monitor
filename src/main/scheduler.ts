@@ -158,8 +158,8 @@ async function tick(): Promise<void> {
 /** 启动调度器（主窗口 ready 后调用；幂等，重复调用返回 false） */
 export function startScheduler(): boolean {
   if (timer) return false
-  console.log(`[scheduler] 启动（tick ${TICK_MS / 1000}s，交易日 ${isTradingDayStatic() ? '是' : '否'}）`)
-  logInfo(`[scheduler] 启动（tick ${TICK_MS / 1000}s，交易日 ${isTradingDayStatic() ? '是' : '否'}）`)
+  console.log(`[scheduler] 启动（tick ${TICK_MS / 1000}s）`)
+  logInfo(`[scheduler] 启动（tick ${TICK_MS / 1000}s）`)
   state.running = true
   state.lastEstimateAt = 0
   state.navTodayDone = false

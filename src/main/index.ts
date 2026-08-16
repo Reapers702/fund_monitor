@@ -170,6 +170,10 @@ if (process.argv.includes('--check')) {
       win.setContentSize(1280, Number(process.argv[vIdx + 1]) || 900)
     }
     registerIpcHandlers(win)
+    // 截图诊断：打印渲染进程 console 错误（排查 ECharts/Vue 渲染问题）
+    win.webContents.on('console-message', (_e, level, message) => {
+      if (level >= 2) console.log(`[renderer console ${level}] ${message}`)
+    })
     win.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
         try {
@@ -201,6 +205,16 @@ if (process.argv.includes('--check')) {
               `window.api.adviceAnalyzeAll().then(r => JSON.stringify({ok: r.ok, done: r.result?.done, total: r.result?.total, notified: r.result?.notified}))`
             )
             console.log('[ipc-test-ai] advice:analyzeAll →', r)
+          }
+          // 详情页诊断：--fund-detail-diag 打印 fundDetail 返回的净值序列尾部（验证渲染进程拿到的最新净值）
+          if (process.argv.includes('--fund-detail-diag')) {
+            const code = hashRoute.replace('/fund/', '').split('/')[0]
+            const r = await win.webContents
+              .executeJavaScript(
+                `window.api.fundDetail('${code}', 120).then(d => JSON.stringify({ navN: d.nav.length, last: d.nav[d.nav.length - 1] }))`
+              )
+              .catch((e) => 'FAIL: ' + (e as Error).message)
+            console.log('[fund-detail-diag]', code, '→', r)
           }
           const diag = await win.webContents
             .executeJavaScript(`({

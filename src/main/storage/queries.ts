@@ -2,6 +2,15 @@
 // 拆分自各 repo 的只读逻辑：列表 / 净值序列 / 估值序列 / 持仓 / 建议 / 股票行情
 import type { Pool } from 'pg'
 
+/**
+ * pg DATE 列（node-postgres 解析为本地时区 00:00 的 Date）转 YYYY-MM-DD。
+ * 必须取本地字段：用 toISOString() 会按 UTC 输出，东八区日期少一天（如 08-14 变 08-13）。
+ */
+function dateOnly(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
 // ---------- 基金列表 ----------
 
 export interface FundCard {
@@ -25,7 +34,7 @@ export async function listFunds(pool: Pool, userId: number): Promise<FundCard[]>
     fund_code: string
     fund_name: string
     is_active: number
-    trade_date: string | null
+    trade_date: Date | null
     dwjz: string | null
     jzzzl: string | null
     holdings_date: string | null
@@ -67,7 +76,7 @@ export async function listFunds(pool: Pool, userId: number): Promise<FundCard[]>
     name: row.fund_name,
     isActive: row.is_active,
     latestNav: row.dwjz === null ? null : Number(row.dwjz).toFixed(4),
-    latestNavDate: row.trade_date ? String(row.trade_date).slice(0, 10) : null,
+    latestNavDate: row.trade_date ? dateOnly(row.trade_date) : null,
     navChangePct: row.jzzzl === null ? null : Number(row.jzzzl),
     ...(estMap.get(row.fund_code) ?? { estPct: null, estTime: null, estSource: null }),
     holdingsDate: row.holdings_date,
@@ -96,7 +105,7 @@ export async function navSeries(pool: Pool, code: string, days = 120): Promise<N
   return r.rows
     .reverse()
     .map((x) => ({
-      date: x.trade_date.toISOString().slice(0, 10),
+      date: dateOnly(x.trade_date),
       nav: Number(x.dwjz),
       changePct: x.jzzzl === null ? null : Number(x.jzzzl)
     }))
@@ -139,7 +148,7 @@ export async function latestHoldings(pool: Pool, code: string): Promise<{ report
     [code]
   )
   if (r.rows.length === 0) return { reportDate: null, rows: [] }
-  const reportDate = r.rows[0].report_date.toISOString().slice(0, 10)
+  const reportDate = dateOnly(r.rows[0].report_date)
 
   const out: HoldingWithStock[] = []
   for (const row of r.rows) {
@@ -203,7 +212,7 @@ export async function fundBasic(pool: Pool, code: string): Promise<FundBasicRow 
     fullName: x.fund_full_name,
     manager: x.manager,
     keeper: x.keeper,
-    foundDate: x.found_date ? x.found_date.toISOString().slice(0, 10) : null,
+    foundDate: x.found_date ? dateOnly(x.found_date) : null,
     navCount: Number(x.nav_count)
   }
 }
@@ -227,7 +236,7 @@ export async function adviceList(pool: Pool, code: string, userId: number, limit
   )
   return r.rows.map((x) => ({
     id: x.id,
-    tradeDate: x.trade_date.toISOString().slice(0, 10),
+    tradeDate: dateOnly(x.trade_date),
     action: x.action,
     reason: x.reason,
     confidence: x.confidence === null ? null : Number(x.confidence),
@@ -270,7 +279,7 @@ export async function estimateGuide(pool: Pool, userId: number): Promise<Estimat
      FROM fund_holdings
      ORDER BY fund_code, report_date DESC`
   )
-  const holdingsMap = new Map(holdings.rows.map((h) => [h.fund_code, h.report_date.toISOString().slice(0, 10)]))
+  const holdingsMap = new Map(holdings.rows.map((h) => [h.fund_code, dateOnly(h.report_date)]))
   return funds.rows.map((f) => ({
     code: f.fund_code,
     name: f.fund_name,
@@ -339,7 +348,7 @@ export async function estimateDiffStats(pool: Pool, userId: number, days = 20): 
       samples: s.samples,
       avgAbsDiff: s.avg_abs_diff === null ? null : Number(s.avg_abs_diff),
       avgDiff: s.avg_diff === null ? null : Number(s.avg_diff),
-      latestTradeDate: l ? l.trade_date.toISOString().slice(0, 10) : null,
+      latestTradeDate: l ? dateOnly(l.trade_date) : null,
       latestDiff: l && l.diff_pct !== null ? Number(l.diff_pct) : null,
       latestEst: l && l.est_pct !== null ? Number(l.est_pct) : null,
       latestNav: l && l.nav_pct !== null ? Number(l.nav_pct) : null
