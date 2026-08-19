@@ -13,6 +13,11 @@ import { initLogger, logInfo, logWarn } from './logger'
 import { initUser, ensureDefaultUser } from './user'
 import { loadConfig } from './config'
 import { createPool, ensureSchema } from './storage/db'
+import { redirectUserData } from './userData'
+
+// 启动最早：userData 重定向到英文目录 fund_monitor（默认是中文 productName 目录），并迁移旧 config/logs。
+// 必须先于 config.ts configPath / logger.ts initLogger 对 userData 的读取。
+redirectUserData()
 
 function createWindow(): BrowserWindow {
   // 主窗口（渲染进程 UI；爬虫走主进程 Node 通道 + 隐藏窗口，不依赖此窗口）
