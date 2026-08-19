@@ -41,6 +41,7 @@ interface FundCard {
   latestNav: string | null
   latestNavDate: string | null
   navChangePct: number | null
+  navFetchedAt: string | null
   estPct: number | null
   estTime: string | null
   estSource: string | null

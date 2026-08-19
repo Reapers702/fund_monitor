@@ -20,6 +20,7 @@ export interface FundCard {
   latestNav: string | null // YYYY-MM-DD
   latestNavDate: string | null
   navChangePct: number | null // 当日涨跌（净值数据自带 jzzzl）
+  navFetchedAt: string | null // 最新净值入库（抓取）时间，ISO
   estPct: number | null // 盘中估值（最新一次采样）
   estTime: string | null
   estSource: string | null // tracking_index / theme_etf
@@ -37,20 +38,21 @@ export async function listFunds(pool: Pool, userId: number): Promise<FundCard[]>
     trade_date: Date | null
     dwjz: string | null
     jzzzl: string | null
+    created_at: Date | null
     holdings_date: string | null
     advice_action: string | null
     advice_confidence: string | null
     advice_date: string | null
   }>(
     `SELECT f.fund_code, f.fund_name, uf.is_active,
-            n.trade_date, n.dwjz, n.jzzzl,
+            n.trade_date, n.dwjz, n.jzzzl, n.created_at,
             (SELECT to_char(max(report_date), 'YYYY-MM-DD') FROM fund_holdings h WHERE h.fund_code = f.fund_code) AS holdings_date,
             a.action AS advice_action, a.confidence AS advice_confidence,
             to_char(a.trade_date, 'YYYY-MM-DD') AS advice_date
      FROM user_fund uf
      JOIN fund_basic f ON f.fund_code = uf.fund_code
      LEFT JOIN LATERAL (
-       SELECT trade_date, dwjz, jzzzl FROM fund_nav_daily
+       SELECT trade_date, dwjz, jzzzl, created_at FROM fund_nav_daily
        WHERE fund_code = f.fund_code ORDER BY trade_date DESC LIMIT 1
      ) n ON true
      LEFT JOIN LATERAL (
@@ -78,6 +80,7 @@ export async function listFunds(pool: Pool, userId: number): Promise<FundCard[]>
     latestNav: row.dwjz === null ? null : Number(row.dwjz).toFixed(4),
     latestNavDate: row.trade_date ? dateOnly(row.trade_date) : null,
     navChangePct: row.jzzzl === null ? null : Number(row.jzzzl),
+    navFetchedAt: row.created_at ? row.created_at.toISOString() : null,
     ...(estMap.get(row.fund_code) ?? { estPct: null, estTime: null, estSource: null }),
     holdingsDate: row.holdings_date,
     adviceAction: row.advice_action,

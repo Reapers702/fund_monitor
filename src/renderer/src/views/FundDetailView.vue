@@ -29,6 +29,13 @@ function pctClass(v: number | null): string {
   return v > 0 ? 'up' : v < 0 ? 'down' : 'muted'
 }
 
+/** 本地时间 YYYY-MM-DD HH:mm:ss（AI 建议生成时间，精确到秒） */
+function fmtDateTime(iso: string): string {
+  const d = new Date(iso)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 function renderChart(): void {
   if (!chartEl.value || !detail.value) return
   if (!chart) {
@@ -264,7 +271,8 @@ watch(
                 <n-tag size="small" :type="actionTag(a.action).type" :bordered="false">
                   {{ actionTag(a.action).text }}
                 </n-tag>
-                <span class="advice-date">{{ a.tradeDate }}</span>
+                <span class="advice-date">{{ fmtDateTime(a.createdAt) }}</span>
+                <span class="advice-trade-date">交易日 {{ a.tradeDate }}</span>
                 <span v-if="a.confidence !== null" class="advice-conf">置信度 {{ a.confidence }}%</span>
               </div>
               <div class="advice-reason">{{ a.reason ?? '（无理由）' }}</div>
@@ -349,6 +357,7 @@ watch(
 }
 
 .advice-date,
+.advice-trade-date,
 .advice-conf {
   font-size: 12px;
   color: var(--text-color-3);

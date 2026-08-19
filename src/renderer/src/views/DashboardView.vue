@@ -122,6 +122,26 @@ function pctClass(v: number | null): string {
   return v > 0 ? 'up' : v < 0 ? 'down' : 'muted'
 }
 
+/** 数据拉取/采样时间短格式：当天 → HH:MM，跨天 → MM-DD HH:MM（避免旧数据只见时分而误判新鲜度） */
+function fmtFetchTime(iso: string | null): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const p = (n: number) => String(n).padStart(2, '0')
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`
+  const now = new Date()
+  if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
+    return hm
+  }
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`
+}
+
+function estSourceLabel(f: FundCard): string {
+  if (f.estSource === 'tracking_index') return 'T1 跟踪指数'
+  if (f.estSource === 'theme_etf') return 'T2 主题ETF'
+  if (f.estSource === 'holdings_weighted') return 'T3 重仓股加权（基于季报）'
+  return '无估值'
+}
+
 /** AI 建议 → 标签（A股习惯：加仓红 / 减仓绿 / 持有蓝） */
 function adviceTag(action: string): { color: { text: string; border: string; color: string }; text: string } {
   if (action === 'add') {
@@ -201,7 +221,9 @@ onBeforeUnmount(() => {
             <div class="metric">
               <div class="metric-label">最新净值</div>
               <div class="metric-value">{{ f.latestNav ?? '--' }}</div>
-              <div class="metric-sub">{{ f.latestNavDate ?? '' }}</div>
+              <div class="metric-sub">
+                {{ f.latestNavDate ?? '' }}{{ f.navFetchedAt ? ' · ' + fmtFetchTime(f.navFetchedAt) + ' 拉取' : '' }}
+              </div>
             </div>
             <div class="metric">
               <div class="metric-label">当日涨跌</div>
@@ -216,7 +238,7 @@ onBeforeUnmount(() => {
                 {{ fmtPct(f.estPct) }}
               </div>
               <div class="metric-sub">
-                {{ f.estSource === 'tracking_index' ? 'T1 跟踪指数' : f.estSource === 'theme_etf' ? 'T2 主题ETF' : f.estSource === 'holdings_weighted' ? 'T3 重仓股加权（基于季报）' : '无估值' }}
+                {{ estSourceLabel(f) }}{{ f.estTime ? ' · ' + fmtFetchTime(f.estTime) + ' 采样' : '' }}
               </div>
             </div>
           </div>
