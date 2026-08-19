@@ -52,6 +52,9 @@ function renderChart(): void {
     date: p.date,
     value: isPct ? +(((p.nav / base) * 100).toFixed(2)) : p.nav
   }))
+  // 盘中估值只画最新一次采样（estimateSeries 按时间升序，末条即当前估算）；全天采样点全部映射到同一日期列，画全部会重叠成一团
+  const latestEst = d.estimate[d.estimate.length - 1]
+  const hasEst = isPct && !!latestEst && latestEst.pct !== null
 
   chart.setOption(
     {
@@ -65,7 +68,7 @@ function renderChart(): void {
           return isPct ? n.toFixed(2) + '%' : n.toFixed(4)
         }
       },
-      legend: { data: isPct ? ['净值走势', '盘中估值(实时采样)'] : ['净值走势'], top: 0 },
+      legend: { data: hasEst ? ['净值走势', '盘中估值(实时采样)'] : ['净值走势'], top: 0 },
       grid: { left: 48, right: 48, top: 36, bottom: 28 },
       xAxis: {
         type: 'category',
@@ -89,12 +92,12 @@ function renderChart(): void {
           areaStyle: { opacity: 0.06 }
         },
         // 盘中估值散点（相对前收的估算涨跌幅，百分比量纲）：仅区间涨跌模式叠加，单位净值模式量纲不同不混画
-        ...(isPct
+        ...(hasEst
           ? [
               {
                 name: '盘中估值(实时采样)',
                 type: 'scatter',
-                data: d.estimate.map((e) => [navPct.length > 0 ? navPct[navPct.length - 1].date : '', e.pct === null ? null : e.pct]),
+                data: [[navPct.length > 0 ? navPct[navPct.length - 1].date : '', latestEst.pct]],
                 symbolSize: 8,
                 itemStyle: { color: '#e5484d' }
               }
