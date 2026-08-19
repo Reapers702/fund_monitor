@@ -116,7 +116,7 @@ npm run build:win
   "pg": { "host": "...", "port": 5432, "user": "...", "password": "...", "db": "fund_monitor", "sslmode": "prefer" },
   "aiFund": { /* 留空自动继承 pg 凭证，仅 db 默认 ai_fund */ },
   "deepseek": { "apiKey": "", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat" },
-  "fetcher": { "navCheckMinutes": 10, "holdingsRefreshDays": 7, "estimateIntervalSeconds": 30 },
+  "fetcher": { "navCheckMinutes": 10, "holdingsRefreshDays": 7, "estimateIntervalSeconds": 300 },
   "analyzer": { "minutes": "35" },
   "fetch": { "channel": "node" },  // node / browser / auto
   "funds": []                       // 初始为空，在"我的基金"页添加

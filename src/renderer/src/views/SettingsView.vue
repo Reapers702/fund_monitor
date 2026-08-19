@@ -52,7 +52,7 @@ const form = ref({
   deepseekModel: '',
   navCheckMinutes: 10,
   holdingsRefreshDays: 7,
-  estimateIntervalSeconds: 30,
+  estimateIntervalSeconds: 300,
   analyzerMinutes: '35',
   fetchChannel: 'node' as 'node' | 'browser' | 'auto',
   autoLaunch: false

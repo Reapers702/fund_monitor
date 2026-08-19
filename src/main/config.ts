@@ -37,7 +37,7 @@ const DEFAULTS: AppConfig = {
   fetcher: {
     navCheckMinutes: 10,
     holdingsRefreshDays: 7,
-    estimateIntervalSeconds: 30
+    estimateIntervalSeconds: 300
   },
   analyzer: { minutes: '35' },
   fetch: { channel: 'node' },

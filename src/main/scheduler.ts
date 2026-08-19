@@ -81,7 +81,7 @@ async function tick(): Promise<void> {
 
     // 1. 盘中估值采样（每 estimateIntervalSeconds 一次；仅交易日）
     if (trading && isIntraday(m)) {
-      const intervalMs = (cfg.fetcher.estimateIntervalSeconds || 30) * 1000
+      const intervalMs = (cfg.fetcher.estimateIntervalSeconds || 300) * 1000
       if (Date.now() - state.lastEstimateAt >= intervalMs) {
         state.lastEstimateAt = Date.now()
         const r = await sampleEstimatesCore(pool)
