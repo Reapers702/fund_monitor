@@ -63,8 +63,10 @@ async function analyzeOne(
   return { done: false, notified: false }
 }
 
-/** 核心：串行分析所有用户各自的自选基金（建议基于各用户持仓，多用户 M9）。不负责连接池生命周期。 */
-export async function runAnalyzeAllCore(pool: Pool, aiFundPool: Pool): Promise<AnalyzeAllResult> {
+/** 核心：串行分析所有用户各自的自选基金（建议基于各用户持仓，多用户 M9）。不负责连接池生命周期。
+ *  skipAnalyzedToday：跳过 trade_date=今日 已有建议记录的基金（scheduler 自动触发用，当日只跑一次；
+ *  手动触发（GUI/CLI）传默认 false，保证"想再分析就再分析"）。 */
+export async function runAnalyzeAllCore(pool: Pool, aiFundPool: Pool, skipAnalyzedToday = false): Promise<AnalyzeAllResult> {
   const users = await pool.query<{ id: number }>('SELECT id FROM app_user ORDER BY id')
   const funds = await pool.query<{ user_id: number; fund_code: string; fund_name: string }>(
     `SELECT uf.user_id, f.fund_code, f.fund_name
@@ -79,9 +81,20 @@ export async function runAnalyzeAllCore(pool: Pool, aiFundPool: Pool): Promise<A
     byUser.set(row.user_id, arr)
   }
 
+  // 今日（trade_date）已出过建议的 (user_id, fund_code)：调度器自动触发时跳过，避免重启/重开重复分析
+  const analyzedToday = new Set<string>()
+  if (skipAnalyzedToday) {
+    const r = await pool.query<{ user_id: number; fund_code: string }>(
+      `SELECT DISTINCT user_id, fund_code FROM ds_advice WHERE trade_date = $1`,
+      [todayStr()]
+    )
+    for (const row of r.rows) analyzedToday.add(`${row.user_id}|${row.fund_code}`)
+  }
+
   const result: AnalyzeAllResult = { total: 0, done: 0, notified: 0, items: [] }
   for (const u of users.rows) {
     for (const f of byUser.get(u.id) ?? []) {
+      if (analyzedToday.has(`${u.id}|${f.fund_code}`)) continue
       result.total++
       const out = await analyzeOne(pool, aiFundPool, u.id, f.fund_code, f.fund_name)
       if (out.done) result.done++

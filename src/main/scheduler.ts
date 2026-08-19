@@ -29,6 +29,8 @@ export interface SchedulerState {
 
 let state: SchedulerState = { running: false, lastEstimateAt: 0, navTodayDone: false, adviceTodayDone: false, lastLog: '未启动' }
 let timer: NodeJS.Timeout | null = null
+// 本会话已做过"今日是否已分析"DB 检查的日期（跨天感知：昨天查过的结果不影响今天）
+let adviceCheckedDate: string | null = null
 
 /** 是否已确认目标交易日净值（所有用户自选基金并集都出净值才算，多用户 M9）。
  *  交易日目标=today；非交易日目标=最近交易日（周五净值周六凌晨公布是常态，周六盘后也要补） */
@@ -123,20 +125,37 @@ async function tick(): Promise<void> {
         }
       }
 
-      // 3. 收盘后 AI 分析（analyzer.minutes 分钟时刻，默认 35 → 15:35；仅交易日，当日只跑一次）
+      // 3. 收盘后 AI 分析（analyzer.minutes 分钟时刻，默认 35 → 15:35；仅交易日，当日只跑一次）。
+      //    当日是否已分析以 ds_advice 持久化记录为准（adviceTodayDone 仅作本会话缓存）：
+      //    - 重启/重新打开应用不重复补跑（记录仍在则跳过）；
+      //    - 托盘常驻跨天后自动失效（次日重新查库，修复原内存标记不重置导致第二天不分析的问题）；
+      //    - 手动触发（GUI/CLI）不走此分支，随时可再分析。
       if (trading && !state.adviceTodayDone && m >= 15 * 60 + (Number(cfg.analyzer.minutes) || 35)) {
-        const aiFundPool = createAiFundPool(cfg)
-        try {
-          const r = await runAnalyzeAllCore(pool, aiFundPool)
-          state.lastLog = `AI 分析 ${r.done}/${r.total}（通知 ${r.notified}）`
-          console.log(`[scheduler] ${state.lastLog}`)
-          logInfo(`[scheduler] ${state.lastLog}`)
-          state.adviceTodayDone = true
-        } catch (e) {
-          console.error(`[scheduler] AI 分析失败: ${(e as Error).message}`)
-          logError(`[scheduler] AI 分析失败: ${(e as Error).message}`)
-        } finally {
-          await aiFundPool.end().catch(() => {})
+        const today = todayStr()
+        if (adviceCheckedDate !== today) {
+          const r = await pool.query('SELECT 1 FROM ds_advice WHERE trade_date = $1 LIMIT 1', [today])
+          state.adviceTodayDone = r.rows.length > 0
+          adviceCheckedDate = today
+          if (state.adviceTodayDone) {
+            state.lastLog = `AI 分析今日已完成（${today}），跳过自动分析`
+            console.log(`[scheduler] ${state.lastLog}`)
+            logInfo(`[scheduler] ${state.lastLog}`)
+          }
+        }
+        if (!state.adviceTodayDone) {
+          const aiFundPool = createAiFundPool(cfg)
+          try {
+            const r = await runAnalyzeAllCore(pool, aiFundPool, true) // 逐基金跳过今日已分析
+            state.lastLog = `AI 分析 ${r.done}/${r.total}（通知 ${r.notified}）`
+            console.log(`[scheduler] ${state.lastLog}`)
+            logInfo(`[scheduler] ${state.lastLog}`)
+            state.adviceTodayDone = true
+          } catch (e) {
+            console.error(`[scheduler] AI 分析失败: ${(e as Error).message}`)
+            logError(`[scheduler] AI 分析失败: ${(e as Error).message}`)
+          } finally {
+            await aiFundPool.end().catch(() => {})
+          }
         }
       }
 
