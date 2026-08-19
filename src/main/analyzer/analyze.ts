@@ -1,9 +1,10 @@
 // AI 分析（计划书 §7.3）：对单只基金生成 加仓/减仓/持有 建议
-// 输入：近120日净值 + 今日涨跌 + 重仓股近10日表现 + 相关新闻（按重仓股/基金名过滤 ai_fund.raw_news）+ 用户持仓（份额/成本/盈亏）
+// 输入：近120日净值 + 今日涨跌 + 盘中估值（当日采样抽稀）+ 重仓股近10日表现 + 相关新闻（按重仓股/基金名过滤 ai_fund.raw_news）+ 用户持仓（份额/成本/盈亏）
 // 输出：固定 JSON { action, confidence, reason }，写 ds_advice 保留 response_raw；action != hold 触发桌面通知
 import type { Pool } from 'pg'
 import { chatComplete, hasDeepseekKey, DeepseekError } from '../llm/deepseek'
-import { navSeries, latestHoldings, fundBasic } from '../storage/queries'
+import { navSeries, latestHoldings, fundBasic, estimateSeries } from '../storage/queries'
+import type { EstPoint } from '../storage/queries'
 import { newsByTags } from '../news/reader'
 import { computePosition } from '../position/position'
 import type { PositionSummary } from '../position/position'
@@ -71,12 +72,51 @@ export function formatTimeContext(t: TimeContext): string {
   return `分析时点：${t.date}（周${t.weekday}，${dayTag}，${t.phase}）。${navTag}。`
 }
 
-const SYSTEM_PROMPT = `你是基金投资分析助手。基于给定的场外基金数据（日净值走势、重仓股近期表现、相关新闻），给出独立的 加仓/减仓/持有 建议。
+const SYSTEM_PROMPT = `你是基金投资分析助手。基于给定的场外基金数据（日净值走势、盘中估值、重仓股近期表现、相关新闻），给出独立的 加仓/减仓/持有 建议。
 规则：
 1. 只依据提供的数据判断，不编造未提供的信息。
 2. 输出且仅输出一个 JSON 对象，不要包含任何其他文字、markdown 代码块或解释。
 3. JSON 格式严格为：{"action":"add|reduce|hold","confidence":0~100,"reason":"中文理由，150字以内"}。
-4. action 含义：add=当前值得加仓；reduce=当前值得减仓/止盈；hold=继续持有观望。`
+4. action 含义：add=当前值得加仓；reduce=当前值得减仓/止盈；hold=继续持有观望。
+5. 盘中估值为预测值、存在误差，仅供盘中参考；判断优先以收盘确认净值为准。`
+
+/** 估值来源 → 中文说明（T1/T2/T3 对应 crawler/estimate.ts 的 source） */
+const SOURCE_NAMES: Record<string, string> = {
+  tracking_index: '跟踪指数',
+  theme_etf: '主题ETF',
+  holdings_weighted: '重仓股加权'
+}
+
+/**
+ * 盘中估值块：把当日采样抽稀成给 AI 看的走势文本。
+ * est.time 是 UTC ISO，需按本地时区判断日期/时刻（东八区，避免 toISOString 少一天）。
+ * 盘中高频采样（默认每 30 秒一条）会撑爆 prompt，故按 30 分钟窗口抽稀、最多留 12 条。
+ * 无当日采样（盘前/非交易日）返回 null，调用方不拼该块。
+ */
+export function formatEstimateBlock(estimate: EstPoint[], today = dateStr(new Date())): string | null {
+  const points = estimate.filter((p) => dateStr(new Date(p.time)) === today)
+  if (points.length === 0) return null
+
+  // 时间升序遍历，同一 30 分钟窗口只留最后一条
+  const buckets = new Map<number, EstPoint>()
+  for (const p of points) {
+    const d = new Date(p.time)
+    buckets.set(Math.floor((d.getHours() * 60 + d.getMinutes()) / 30), p)
+  }
+  const picked = [...buckets.values()].slice(-12)
+
+  const hm = (p: EstPoint) => {
+    const d = new Date(p.time)
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  }
+  const pct = (p: EstPoint) => (p.pct === null ? '--' : p.pct.toFixed(2) + '%')
+
+  const last = points[points.length - 1]
+  const src = SOURCE_NAMES[last.source] ?? last.source
+  return `盘中估值（${src}，最新 ${hm(last)}）：${pct(last)}
+当日估值走势（每 30 分钟抽稀，共 ${picked.length} 条）：
+${picked.map((p) => `${hm(p)} ${pct(p)}`).join('\n')}`
+}
 
 function buildUserPrompt(
   fundName: string,
@@ -85,13 +125,16 @@ function buildUserPrompt(
   holdings: Awaited<ReturnType<typeof latestHoldings>>,
   news: { title: string | null; summary: string | null; sentiment: string | null; llmTags: string[] }[],
   position: PositionSummary | null,
-  timeCtx: string
+  timeCtx: string,
+  estimate: Awaited<ReturnType<typeof estimateSeries>>
 ): string {
   const latestNav = nav[nav.length - 1]
   const firstNav = nav[0]
   const periodPct = firstNav && firstNav.nav > 0 ? (((latestNav.nav - firstNav.nav) / firstNav.nav) * 100).toFixed(2) : null
 
   const navLines = nav.slice(-30).map((p) => `${p.date} ${p.nav.toFixed(4)} (${p.changePct === null ? '--' : p.changePct.toFixed(2)}%)`).join('\n')
+
+  const estBlock = formatEstimateBlock(estimate)
 
   const holdLines = holdings.rows
     .slice(0, 10)
@@ -115,7 +158,7 @@ function buildUserPrompt(
 基金：${fundName}（${code}）
 净值样本数：${nav.length} 条；区间涨跌：${periodPct ?? '--'}%（近${nav.length}个交易日，归一化起点）
 最新净值：${latestNav.nav.toFixed(4)}（${latestNav.date}），当日涨跌 ${latestNav.changePct === null ? '--' : latestNav.changePct.toFixed(2)}%
-${posLines}
+${estBlock ? estBlock + '\n' : ''}${posLines}
 
 近 30 日净值：
 ${navLines}
@@ -156,6 +199,8 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     return null
   }
   const holdings = await latestHoldings(pool, code)
+  // 盘中估值：最近 24h 采样（盘前/非交易日通常为空，buildUserPrompt 内自动省略该块）
+  const estimate = await estimateSeries(pool, code)
 
   // 用户持仓：显式 cost 参数优先；否则从该用户 fund_trade 移动加权计算（M7/M9）
   let position: PositionSummary | null = null
@@ -196,7 +241,7 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     console.warn(`[analyze] ${code} 时点上下文计算失败（忽略继续）: ${(e as Error).message}`)
   }
 
-  const userPrompt = buildUserPrompt(basic.name, code, nav, holdings, news, position, timeCtx)
+  const userPrompt = buildUserPrompt(basic.name, code, nav, holdings, news, position, timeCtx, estimate)
   const raw = await chatComplete(
     [
       { role: 'system', content: SYSTEM_PROMPT },
