@@ -3,7 +3,7 @@ import { ref, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NCard, NDescriptions, NDescriptionsItem, NTag, NButton, NSpin, NEmpty,
-  NTable, NAlert, useMessage
+  NTable, NAlert, NRadioGroup, NRadioButton, useMessage
 } from 'naive-ui'
 import * as echarts from 'echarts'
 
@@ -15,6 +15,7 @@ const code = route.params.code as string
 const detail = ref<FundDetail | null>(null)
 const loading = ref(true)
 const range = ref<number>(120) // 图表范围（天）
+const navMode = ref<'nav' | 'pct'>('nav') // 默认 APP 视角：单位净值绝对值；可切换"区间涨跌"（归一化 100%）
 
 const chartEl = ref<HTMLDivElement | null>(null)
 let chart: echarts.ECharts | null = null
@@ -44,49 +45,70 @@ function renderChart(): void {
 
   const d = detail.value
   const nav = d.nav
-  // 净值归一化到 1（起点 100%），便于观察走势
-  const base = nav.length > 0 ? nav[0].nav : 1
+  const isPct = navMode.value === 'pct'
+  // 净值模式：单位净值绝对值（元，APP 默认视角）；区间涨跌模式：归一化到范围起点 100%（相对涨跌幅，可与盘中估值散点同量纲叠加）
+  const base = isPct && nav.length > 0 ? nav[0].nav : 1
   const navPct = nav.map((p) => ({
     date: p.date,
-    value: +(((p.nav / base) * 100).toFixed(2))
+    value: isPct ? +(((p.nav / base) * 100).toFixed(2)) : p.nav
   }))
 
-  chart.setOption({
-    backgroundColor: 'transparent',
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['净值走势', '盘中估值(实时采样)'], top: 0 },
-    grid: { left: 48, right: 48, top: 36, bottom: 28 },
-    xAxis: {
-      type: 'category',
-      boundaryGap: false,
-      data: navPct.map((p) => p.date),
-      axisLabel: { fontSize: 10 }
-    },
-    yAxis: {
-      type: 'value',
-      scale: true,
-      axisLabel: { fontSize: 10, formatter: '{value}%' }
-    },
-    series: [
-      {
-        name: '净值走势',
-        type: 'line',
-        smooth: true,
-        showSymbol: false,
-        data: navPct.map((p) => p.value),
-        lineStyle: { width: 2 },
-        areaStyle: { opacity: 0.06 }
+  chart.setOption(
+    {
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis',
+        valueFormatter: (v: unknown) => {
+          if (v === null || v === undefined || v === '') return '--'
+          const n = Number(v)
+          if (Number.isNaN(n)) return String(v)
+          return isPct ? n.toFixed(2) + '%' : n.toFixed(4)
+        }
       },
-      {
-        name: '盘中估值(实时采样)',
-        type: 'scatter',
-        // 估值为当日盘中采样，x 落在最新交易日、y 为相对前收的估算涨跌幅
-        data: d.estimate.map((e) => [navPct.length > 0 ? navPct[navPct.length - 1].date : '', e.pct === null ? null : e.pct]),
-        symbolSize: 8,
-        itemStyle: { color: '#e5484d' }
-      }
-    ]
-  })
+      legend: { data: isPct ? ['净值走势', '盘中估值(实时采样)'] : ['净值走势'], top: 0 },
+      grid: { left: 48, right: 48, top: 36, bottom: 28 },
+      xAxis: {
+        type: 'category',
+        boundaryGap: false,
+        data: navPct.map((p) => p.date),
+        axisLabel: { fontSize: 10 }
+      },
+      yAxis: {
+        type: 'value',
+        scale: true,
+        axisLabel: { fontSize: 10, formatter: isPct ? '{value}%' : (v: string) => Number(v).toFixed(2) }
+      },
+      series: [
+        {
+          name: '净值走势',
+          type: 'line',
+          smooth: true,
+          showSymbol: false,
+          data: navPct.map((p) => p.value),
+          lineStyle: { width: 2 },
+          areaStyle: { opacity: 0.06 }
+        },
+        // 盘中估值散点（相对前收的估算涨跌幅，百分比量纲）：仅区间涨跌模式叠加，单位净值模式量纲不同不混画
+        ...(isPct
+          ? [
+              {
+                name: '盘中估值(实时采样)',
+                type: 'scatter',
+                data: d.estimate.map((e) => [navPct.length > 0 ? navPct[navPct.length - 1].date : '', e.pct === null ? null : e.pct]),
+                symbolSize: 8,
+                itemStyle: { color: '#e5484d' }
+              }
+            ]
+          : [])
+      ]
+    },
+    { notMerge: true } // 模式切换时 series 数量会变（估值散点有无），需全量重绘避免旧 series 残留
+  )
+}
+
+function changeMode(mode: string): void {
+  navMode.value = mode === 'pct' ? 'pct' : 'nav'
+  renderChart()
 }
 
 function resizeChart(): void {
@@ -223,7 +245,13 @@ watch(
           </div>
         </n-card>
 
-        <n-card title="净值走势（归一化）" class="chart-card">
+        <n-card title="净值走势" class="chart-card">
+          <template #header-extra>
+            <n-radio-group size="small" :value="navMode" @update:value="changeMode">
+              <n-radio-button value="nav">单位净值</n-radio-button>
+              <n-radio-button value="pct">区间涨跌</n-radio-button>
+            </n-radio-group>
+          </template>
           <div ref="chartEl" class="chart"></div>
           <p v-if="detail.nav.length === 0" class="chart-empty">暂无净值数据，请先执行 --fund {{ code }} 补数据。</p>
         </n-card>

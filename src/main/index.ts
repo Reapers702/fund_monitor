@@ -221,6 +221,16 @@ if (process.argv.includes('--check')) {
               .catch((e) => 'FAIL: ' + (e as Error).message)
             console.log('[fund-detail-diag]', code, '→', r)
           }
+          // 详情页图表模式验证：--nav-mode pct 时点击"区间涨跌"（默认截图验证 APP 视角"单位净值"）
+          if (process.argv.includes('--nav-mode')) {
+            const target = process.argv[process.argv.indexOf('--nav-mode') + 1] === 'pct' ? '区间涨跌' : '单位净值'
+            await win.webContents
+              .executeJavaScript(
+                `[...document.querySelectorAll('.n-radio-button')].find(b => b.textContent?.includes(${JSON.stringify(target)}))?.click()`
+              )
+              .catch(() => {})
+            await new Promise((res) => setTimeout(res, 500))
+          }
           const diag = await win.webContents
             .executeJavaScript(`({
               adviceBtn: [...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(t => t && t.includes('分析')),
