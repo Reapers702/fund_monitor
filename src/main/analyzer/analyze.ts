@@ -1,5 +1,6 @@
 // AI 分析（计划书 §7.3）：对单只基金生成 加仓/减仓/持有 建议
-// 输入：近120日净值 + 今日涨跌 + 盘中估值（当日采样抽稀）+ 重仓股近10日表现 + 相关新闻（按重仓股/基金名过滤 ai_fund.raw_news）+ 用户持仓（份额/成本/盈亏）
+// 输入：近120日净值 + 量化指标（回撤/波动/夏普/相对沪深300超额）+ 今日涨跌 + 盘中估值（当日采样抽稀）
+//      + 重仓股近10日表现 + 相关新闻（按重仓股/基金名过滤 ai_fund.raw_news）+ 用户持仓（份额/成本/盈亏）
 // 输出：固定 JSON { action, confidence, reason }，写 ds_advice 保留 response_raw；action != hold 触发桌面通知
 import type { Pool } from 'pg'
 import { chatComplete, hasDeepseekKey, DeepseekError } from '../llm/deepseek'
@@ -11,6 +12,9 @@ import type { PositionSummary } from '../position/position'
 import { createAiFundPool } from '../storage/db'
 import { isIntraday, isAfterClose } from '../scheduler/time'
 import { isTradingDay as isTradingDayCal } from '../scheduler/tradingCalendar'
+import { klinesBySecid } from '../crawler/market'
+import { computeFundMetrics, computeRelativeStrength, formatMetricsBlock } from './metrics'
+import type { NavLike } from './metrics'
 import { parseAdvice } from './parse'
 
 export interface AnalyzeInput {
@@ -72,13 +76,38 @@ export function formatTimeContext(t: TimeContext): string {
   return `分析时点：${t.date}（周${t.weekday}，${dayTag}，${t.phase}）。${navTag}。`
 }
 
-const SYSTEM_PROMPT = `你是基金投资分析助手。基于给定的场外基金数据（日净值走势、盘中估值、重仓股近期表现、相关新闻），给出独立的 加仓/减仓/持有 建议。
+const SYSTEM_PROMPT = `你是基金投资分析助手。基于给定的场外基金数据（日净值走势、量化指标、盘中估值、重仓股近期表现、相关新闻），给出独立的 加仓/减仓/持有 建议。
 规则：
 1. 只依据提供的数据判断，不编造未提供的信息。
 2. 输出且仅输出一个 JSON 对象，不要包含任何其他文字、markdown 代码块或解释。
 3. JSON 格式严格为：{"action":"add|reduce|hold","confidence":0~100,"reason":"中文理由，150字以内"}。
 4. action 含义：add=当前值得加仓；reduce=当前值得减仓/止盈；hold=继续持有观望。
-5. 盘中估值为预测值、存在误差，仅供盘中参考；判断优先以收盘确认净值为准。`
+5. 盘中估值为预测值、存在误差，仅供盘中参考；判断优先以收盘确认净值为准。
+6. 量化指标（年化收益/波动率/夏普/最大回撤/相对沪深300超额）已算好，直接用于判断风险收益特征与相对强弱，不要自行重算。`
+
+/** 相对基准指数（沪深300）——用于计算基金超额收益，secid 见 crawler/market */
+const BENCHMARK_SECID = '1.000300'
+const BENCHMARK_NAME = '沪深300'
+/** 基准日 K 进程内缓存：analyze-all 会对同一基准重复请求，30 分钟内复用 */
+const BENCHMARK_TTL_MS = 30 * 60_000
+let benchmarkCache: { ts: number; nav: NavLike[] } | null = null
+
+/** 取基准指数日 K（失败/为空返回 null，不阻断分析）；带 30 分钟缓存 */
+async function loadBenchmarkNav(): Promise<NavLike[] | null> {
+  if (benchmarkCache && Date.now() - benchmarkCache.ts < BENCHMARK_TTL_MS) return benchmarkCache.nav
+  try {
+    const { rows } = await klinesBySecid(BENCHMARK_SECID, 260)
+    const nav = rows
+      .filter((r) => r.close !== null && r.close > 0)
+      .map((r) => ({ date: r.tradeDate, nav: r.close as number }))
+    if (nav.length === 0) return null
+    benchmarkCache = { ts: Date.now(), nav }
+    return nav
+  } catch (e) {
+    console.warn(`[analyze] 基准 ${BENCHMARK_NAME} 日K获取失败（相对强弱省略）: ${(e as Error).message}`)
+    return null
+  }
+}
 
 /** 估值来源 → 中文说明（T1/T2/T3 对应 crawler/estimate.ts 的 source） */
 const SOURCE_NAMES: Record<string, string> = {
@@ -90,7 +119,7 @@ const SOURCE_NAMES: Record<string, string> = {
 /**
  * 盘中估值块：把当日采样抽稀成给 AI 看的走势文本。
  * est.time 是 UTC ISO，需按本地时区判断日期/时刻（东八区，避免 toISOString 少一天）。
- * 盘中高频采样（默认每 30 秒一条）会撑爆 prompt，故按 30 分钟窗口抽稀、最多留 12 条。
+ * 盘中高频采样（默认每 5 分钟一条）会撑爆 prompt，故按 30 分钟窗口抽稀、最多留 12 条。
  * 无当日采样（盘前/非交易日）返回 null，调用方不拼该块。
  */
 export function formatEstimateBlock(estimate: EstPoint[], today = dateStr(new Date())): string | null {
@@ -126,7 +155,8 @@ function buildUserPrompt(
   news: { title: string | null; summary: string | null; sentiment: string | null; llmTags: string[] }[],
   position: PositionSummary | null,
   timeCtx: string,
-  estimate: Awaited<ReturnType<typeof estimateSeries>>
+  estimate: Awaited<ReturnType<typeof estimateSeries>>,
+  metricsBlock: string | null = null
 ): string {
   const latestNav = nav[nav.length - 1]
   const firstNav = nav[0]
@@ -158,7 +188,7 @@ function buildUserPrompt(
 基金：${fundName}（${code}）
 净值样本数：${nav.length} 条；区间涨跌：${periodPct ?? '--'}%（近${nav.length}个交易日，归一化起点）
 最新净值：${latestNav.nav.toFixed(4)}（${latestNav.date}），当日涨跌 ${latestNav.changePct === null ? '--' : latestNav.changePct.toFixed(2)}%
-${estBlock ? estBlock + '\n' : ''}${posLines}
+${estBlock ? estBlock + '\n' : ''}${metricsBlock ? metricsBlock + '\n' : ''}${posLines}
 
 近 30 日净值：
 ${navLines}
@@ -241,7 +271,19 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     console.warn(`[analyze] ${code} 时点上下文计算失败（忽略继续）: ${(e as Error).message}`)
   }
 
-  const userPrompt = buildUserPrompt(basic.name, code, nav, holdings, news, position, timeCtx, estimate)
+  // 量化指标：把净值算成回撤/波动/夏普/相对沪深300超额，喂给 AI（模型只解读，不自行重算）
+  // 基准日K获取失败时降级为仅基金自身指标；极端情况下整体跳过指标块，不影响分析主流程
+  let metricsBlock: string | null = null
+  try {
+    const fundMetrics = computeFundMetrics(nav)
+    const benchNav = await loadBenchmarkNav()
+    const rs = benchNav ? computeRelativeStrength(nav, benchNav, [20, 60], BENCHMARK_NAME) : null
+    metricsBlock = formatMetricsBlock(fundMetrics, rs)
+  } catch (e) {
+    console.warn(`[analyze] ${code} 量化指标计算失败（忽略继续）: ${(e as Error).message}`)
+  }
+
+  const userPrompt = buildUserPrompt(basic.name, code, nav, holdings, news, position, timeCtx, estimate, metricsBlock)
   const raw = await chatComplete(
     [
       { role: 'system', content: SYSTEM_PROMPT },

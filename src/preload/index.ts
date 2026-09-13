@@ -31,6 +31,7 @@ const api: FundApi = {
   positionDeleteTrade: (id: number): Promise<boolean> => ipcRenderer.invoke('position:deleteTrade', id),
   positionProfile: (patch?: { buyFeePct?: number; sellFeePct?: number }): Promise<FundProfile> =>
     ipcRenderer.invoke('position:profile', patch),
+  portfolioAnalysis: (): Promise<PortfolioAnalysis> => ipcRenderer.invoke('portfolio:analysis'),
 
   newsRecent: (limit?: number): Promise<NewsRow[]> => ipcRenderer.invoke('news:recent', limit),
 

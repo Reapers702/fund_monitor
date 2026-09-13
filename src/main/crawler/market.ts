@@ -143,9 +143,13 @@ interface KlineResp {
  * klines 行格式: "date,open,close,high,low,volume,amount,amp%"
  */
 export async function stockKlines(code: string, lmt = 120): Promise<{ name: string; rows: KlineRow[] }> {
-  const secid = secidOf(code)
+  return klinesBySecid(secidOf(code), lmt)
+}
+
+/** 按完整 secid 取日 K（指数等非证券代码直接用，如 1.000300 沪深300；push2his 熔断/失败降级腾讯） */
+export async function klinesBySecid(secid: string, lmt = 120): Promise<{ name: string; rows: KlineRow[] }> {
   if (push2Blocked()) {
-    return klinesFallbackTencent(code, lmt)
+    return klinesFallbackTencent(secid, lmt)
   }
   const url =
     `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}` +
@@ -171,21 +175,22 @@ export async function stockKlines(code: string, lmt = 120): Promise<{ name: stri
   } catch (e) {
     const msg = (e as Error).message
     if (isConnError(msg)) blockPush2()
-    console.warn(`[market] push2his ${code} 失败，降级腾讯日K: ${msg}`)
-    return klinesFallbackTencent(code, lmt)
+    console.warn(`[market] push2his ${secid} 失败，降级腾讯日K: ${msg}`)
+    return klinesFallbackTencent(secid, lmt)
   }
 }
 
 /** 腾讯前复权日 K：web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh600519,day,,,N,qfq
- *  返回 data.{code}.qfqday = [[date,open,close,high,low,volume], ...] */
-async function klinesFallbackTencent(code: string, lmt: number): Promise<{ name: string; rows: KlineRow[] }> {
-  const mktCode = secidToMarketCode(secidOf(code))
+ *  返回 data.{code}.qfqday = [[date,open,close,high,low,volume], ...]；指数无复权数据，取 data.{code}.day */
+async function klinesFallbackTencent(secid: string, lmt: number): Promise<{ name: string; rows: KlineRow[] }> {
+  const mktCode = secidToMarketCode(secid)
+  const code = secid.split('.')[1] ?? secid
   const text = await httpGetText(
     `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${mktCode},day,,,${lmt},qfq`,
     { referer: 'https://gu.qq.com/', retries: 0 }
   )
-  const d = JSON.parse(text) as { data?: Record<string, { qfqday?: string[][] }> }
-  const arr = d.data?.[mktCode]?.qfqday ?? []
+  const d = JSON.parse(text) as { data?: Record<string, { qfqday?: string[][]; day?: string[][] }> }
+  const arr = d.data?.[mktCode]?.qfqday ?? d.data?.[mktCode]?.day ?? []
   const rows: KlineRow[] = arr.map((c) => ({
     tradeDate: c[0],
     open: parseNum(c[1]),

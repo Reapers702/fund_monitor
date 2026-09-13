@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NCard, NDescriptions, NDescriptionsItem, NTag, NButton, NSpin, NEmpty,
@@ -143,6 +143,37 @@ function actionTag(action: string): { type: 'success' | 'warning' | 'info'; text
   if (action === 'add') return { type: 'success', text: '加仓' }
   if (action === 'reduce') return { type: 'warning', text: '减仓' }
   return { type: 'info', text: '持有' }
+}
+
+// ---------- 建议复盘（analyzer/review 计算，随 fund:detail 返回） ----------
+
+/** 建议 id → 复盘结果（入场日 + 后续各周期涨跌/是否命中） */
+const reviewItems = computed(() => {
+  const m = new Map<number, AdviceReviewItem>()
+  for (const it of detail.value?.adviceReview.items ?? []) m.set(it.id, it)
+  return m
+})
+
+const reviewStats = computed(() => detail.value?.adviceReview.stats ?? [])
+const reviewHorizons = computed(() => detail.value?.adviceReview.horizons ?? [])
+/** 是否已有满期可复盘样本（含 hold——hold 虽无方向，其后续收益仍有参考价值） */
+const hasReviewSamples = computed(() => reviewStats.value.some((s) => s.evaluated > 0))
+
+/** 命中率/占比 → 百分比文本，分母 0 显示 -- */
+function rate(hit: number, total: number): string {
+  if (total <= 0) return '--'
+  return `${((hit / total) * 100).toFixed(0)}%（${hit}/${total}）`
+}
+
+/** 复盘用的涨跌文本（与图表一致的 up/down 配色） */
+function fmtRet(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return '--'
+  return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
+}
+
+/** 取某条建议的复盘结果（模板内用，避免非空断言） */
+function revOf(id: number): AdviceReviewItem | undefined {
+  return reviewItems.value.get(id)
 }
 
 // ---------- AI 分析 ----------
@@ -307,8 +338,67 @@ watch(
                 <span v-if="a.confidence !== null" class="advice-conf">置信度 {{ a.confidence }}%</span>
               </div>
               <div class="advice-reason">{{ a.reason ?? '（无理由）' }}</div>
+              <!-- 事后实际走势：入场日 = 建议后首个交易日 -->
+              <div v-if="revOf(a.id)?.entryDate" class="advice-actual">
+                <span class="actual-label">建议后（{{ revOf(a.id)?.entryDate }} 起）</span>
+                <span v-for="(h, i) in reviewHorizons" :key="h" class="actual-cell">
+                  {{ h }}日
+                  <span :class="pctClass(revOf(a.id)?.returns[i] ?? null)">{{ fmtRet(revOf(a.id)?.returns[i]) }}</span>
+                  <span
+                    v-if="revOf(a.id)?.hits[i] !== null && revOf(a.id)?.hits[i] !== undefined"
+                    :class="revOf(a.id)?.hits[i] ? 'hit' : 'miss'"
+                  >
+                    {{ revOf(a.id)?.hits[i] ? '✓' : '✗' }}
+                  </span>
+                </span>
+              </div>
+              <div v-else class="advice-actual muted">建议后走势数据不足（净值未更新或建议过新）</div>
             </n-alert>
           </div>
+        </n-card>
+
+        <n-card title="AI 建议复盘" class="review-card">
+          <template #header-extra>
+            <span class="review-note">对照实际净值检验建议方向</span>
+          </template>
+          <n-empty v-if="!hasReviewSamples" description="暂无可复盘样本：建议需满 5/10/20 个交易日才能评估后续走势" />
+          <template v-else>
+            <n-table size="small" :bordered="false">
+              <thead>
+                <tr>
+                  <th>周期</th>
+                  <th>已评估</th>
+                  <th>样本（加/减）</th>
+                  <th>命中率</th>
+                  <th>加仓命中</th>
+                  <th>减仓命中</th>
+                  <th>加仓后均涨</th>
+                  <th>减仓后均涨</th>
+                  <th>持有后均涨</th>
+                  <th>高置信命中率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="s in reviewStats" :key="s.horizon">
+                  <td>{{ s.horizon }} 交易日</td>
+                  <td>{{ s.evaluated }}</td>
+                  <td>{{ s.matured }}</td>
+                  <td>{{ rate(s.hits, s.matured) }}</td>
+                  <td>{{ rate(s.addHit, s.addTotal) }}</td>
+                  <td>{{ rate(s.reduceHit, s.reduceTotal) }}</td>
+                  <td :class="pctClass(s.avgRetAdd)">{{ fmtRet(s.avgRetAdd) }}</td>
+                  <td :class="pctClass(s.avgRetReduce)">{{ fmtRet(s.avgRetReduce) }}</td>
+                  <td :class="pctClass(s.avgRetHold)">{{ fmtRet(s.avgRetHold) }}</td>
+                  <td>{{ rate(s.highConfHit, s.highConfTotal) }}</td>
+                </tr>
+              </tbody>
+            </n-table>
+            <p class="review-hint">
+              入场日取建议交易日之后第一个交易日（收盘后出建议，当日净值尚未公布，避免前视偏差）。
+              命中率只统计有方向的加仓/减仓建议；hold 无方向不进命中率，其后续收益单列「持有后均涨」。
+              「高置信」指置信度 ≥ 70 的建议。若加仓后均涨为负、或减仓后均涨为正，说明该方向上判断有偏差。
+            </p>
+          </template>
         </n-card>
       </template>
 
@@ -347,7 +437,8 @@ watch(
 
 .chart-card,
 .hold-card,
-.advice-card {
+.advice-card,
+.review-card {
   margin-top: 16px;
 }
 
@@ -397,6 +488,46 @@ watch(
 .advice-reason {
   font-size: 13px;
   line-height: 1.6;
+}
+
+/* 建议后的实际走势（复盘内联） */
+.advice-actual {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.actual-label {
+  color: var(--text-color-3);
+}
+
+.actual-cell {
+  color: var(--text-color-3);
+}
+
+.hit {
+  color: #1f9d55;
+  font-weight: 700;
+}
+
+.miss {
+  color: #e5484d;
+  font-weight: 700;
+}
+
+.review-note {
+  font-size: 12px;
+  color: var(--text-color-3);
+}
+
+.review-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-color-3);
 }
 
 .up {

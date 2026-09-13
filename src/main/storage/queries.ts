@@ -1,6 +1,8 @@
 // 聚合查询层（渲染进程经 IPC 调用，只读）
 // 拆分自各 repo 的只读逻辑：列表 / 净值序列 / 估值序列 / 持仓 / 建议 / 股票行情
 import type { Pool } from 'pg'
+import type { PortfolioHolding } from '../portfolio/portfolio'
+import type { NavLike } from '../analyzer/metrics'
 
 /**
  * pg DATE 列（node-postgres 解析为本地时区 00:00 的 Date）转 YYYY-MM-DD。
@@ -245,6 +247,54 @@ export async function adviceList(pool: Pool, code: string, userId: number, limit
     confidence: x.confidence === null ? null : Number(x.confidence),
     createdAt: x.created_at.toISOString()
   }))
+}
+
+// ---------- 组合视角（持仓页：跨基金重仓股重叠 / 集中度 / 相关性） ----------
+
+/** 批量取多只基金各自最新报告期的重仓股（一次查询，避免逐基金 N+1） */
+export async function latestHoldingsBatch(pool: Pool, codes: string[]): Promise<Map<string, PortfolioHolding[]>> {
+  const out = new Map<string, PortfolioHolding[]>()
+  if (codes.length === 0) return out
+  const r = await pool.query<{ fund_code: string; stock_code: string | null; stock_name: string | null; weight: string | null }>(
+    `SELECT fund_code, stock_code, stock_name, weight
+     FROM (
+       SELECT h.fund_code, h.stock_code, h.stock_name, h.weight, h.rank,
+              h.report_date, max(h.report_date) OVER (PARTITION BY h.fund_code) AS mx
+       FROM fund_holdings h
+       WHERE h.fund_code = ANY($1)
+     ) t
+     WHERE report_date = mx
+     ORDER BY fund_code, rank`,
+    [codes]
+  )
+  for (const row of r.rows) {
+    const list = out.get(row.fund_code) ?? []
+    list.push({
+      stockCode: row.stock_code,
+      stockName: row.stock_name,
+      weight: row.weight === null ? null : Number(row.weight)
+    })
+    out.set(row.fund_code, list)
+  }
+  return out
+}
+
+/** 批量取多只基金近 days 个自然日的净值（升序），用于组合相关性对齐 */
+export async function navSeriesBatch(pool: Pool, codes: string[], days = 180): Promise<Map<string, NavLike[]>> {
+  const out = new Map<string, NavLike[]>()
+  if (codes.length === 0) return out
+  const r = await pool.query<{ fund_code: string; trade_date: Date; dwjz: string }>(
+    `SELECT fund_code, trade_date, dwjz FROM fund_nav_daily
+     WHERE fund_code = ANY($1) AND trade_date > CURRENT_DATE - make_interval(days => $2)
+     ORDER BY fund_code, trade_date`,
+    [codes, days]
+  )
+  for (const row of r.rows) {
+    const list = out.get(row.fund_code) ?? []
+    list.push({ date: dateOnly(row.trade_date), nav: Number(row.dwjz) })
+    out.set(row.fund_code, list)
+  }
+  return out
 }
 
 // ---------- 估值说明页（各基金当前估值方式） ----------

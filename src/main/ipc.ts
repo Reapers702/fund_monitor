@@ -11,11 +11,15 @@ import {
   fundBasic,
   adviceList,
   estimateGuide,
-  estimateDiffStats
+  estimateDiffStats,
+  latestHoldingsBatch,
+  navSeriesBatch
 } from './storage/queries'
+import { analyzePortfolio } from './portfolio/portfolio'
 import { findTrackingIndex } from './crawler/estimate'
 import { syncFund } from './fund'
 import { analyzeFund, saveAdvice, todayStr } from './analyzer/analyze'
+import { evaluateAdviceReviews } from './analyzer/review'
 import { notifyAdvice } from './notifier'
 import { runQuotesCore } from './quotes'
 import { runAnalyzeAllCore } from './analyze'
@@ -169,14 +173,22 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     const pool = createPool(cfg)
     try {
       const uid = getCurrentUserId()
-      const [basic, nav, est, holdings, advice] = await Promise.all([
+      // 净值/建议一次取足（净值 400 日覆盖 1 年+复盘、建议 200 条）：展示用切片，复盘用全量，避免重复查库
+      const [basic, navAll, est, holdings, adviceAll] = await Promise.all([
         fundBasic(pool, code),
-        navSeries(pool, code, days),
+        navSeries(pool, code, 400),
         estimateSeries(pool, code),
         latestHoldings(pool, code),
-        adviceList(pool, code, uid)
+        adviceList(pool, code, uid, 200)
       ])
-      return { basic, nav, estimate: est, holdings, advice }
+      return {
+        basic,
+        nav: navAll.slice(-days),
+        estimate: est,
+        holdings,
+        advice: adviceAll.slice(0, 20),
+        adviceReview: evaluateAdviceReviews(adviceAll, navAll)
+      }
     } finally {
       await pool.end().catch(() => {})
     }
@@ -277,6 +289,34 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
       return await estimateDiffStats(pool, getCurrentUserId(), days)
     } catch (e) {
       console.error('[ipc] estimate:diff 失败:', (e as Error).message)
+      throw e
+    } finally {
+      await pool.end().catch(() => {})
+    }
+  })
+
+  // 组合视角（持仓页）：跨基金重仓股重叠/隐性集中度 + 基金相关性（纯函数在 portfolio/portfolio 计算）
+  ipcMain.handle('portfolio:analysis', async (): Promise<PortfolioAnalysis> => {
+    const cfg = loadConfig()
+    const pool = createPool(cfg)
+    try {
+      const uid = getCurrentUserId()
+      const [funds, positions] = await Promise.all([listFunds(pool, uid), listPositions(pool, uid)])
+      const active = funds.filter((f) => f.isActive === 1)
+      const codes = active.map((f) => f.code)
+      const [holdingsMap, navMap] = await Promise.all([latestHoldingsBatch(pool, codes), navSeriesBatch(pool, codes, 180)])
+      const mvMap = new Map(positions.map((p) => [p.fundCode, p.marketValue]))
+      return analyzePortfolio(
+        active.map((f) => ({
+          code: f.code,
+          name: f.name,
+          marketValue: mvMap.get(f.code) ?? null,
+          holdings: holdingsMap.get(f.code) ?? [],
+          nav: navMap.get(f.code) ?? []
+        }))
+      )
+    } catch (e) {
+      console.error('[ipc] portfolio:analysis 失败:', (e as Error).message)
       throw e
     } finally {
       await pool.end().catch(() => {})

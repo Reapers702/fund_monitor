@@ -10,6 +10,10 @@ const positions = ref<PositionSummary[]>([])
 const tradesByFund = ref<Record<string, TradeRow[]>>({})
 const loading = ref(true)
 const profile = ref<FundProfile>({ buyFeePct: 0, sellFeePct: 0 })
+/** 组合视角（跨基金重仓股重叠/集中度/相关性）；由 main/portfolio/portfolio.ts 计算 */
+const portfolio = ref<PortfolioAnalysis | null>(null)
+/** 集中度提示阈值（与 main/portfolio/portfolio.ts 的 CONCENTRATION_WARN_PCT 保持一致） */
+const CONCENTRATION_WARN_PCT = 10
 
 // 录入表单
 const showForm = ref(false)
@@ -56,6 +60,7 @@ async function load(): Promise<void> {
       const d = await window.api.positionDetail(p.fundCode)
       tradesByFund.value[p.fundCode] = d.trades
     }
+    portfolio.value = await window.api.portfolioAnalysis()
   } catch (e) {
     message.error(`加载持仓失败: ${(e as Error).message}`)
   } finally {
@@ -83,6 +88,16 @@ function fmtTime(iso: string): string {
 function pctClass(v: number | null): string {
   if (v === null) return 'muted'
   return v > 0 ? 'up' : v < 0 ? 'down' : 'muted'
+}
+
+/** 达到集中度提示阈值的个股（隐性集中度） */
+const highStocks = computed(() => (portfolio.value?.topStocks ?? []).filter((s) => s.high))
+
+/** 相关系数配色：≥0.8 同涨同跌严重（分散效果差），≥0.5 偏高 */
+function corrClass(v: number): string {
+  if (v >= 0.8) return 'risk-high'
+  if (v >= 0.5) return 'risk-mid'
+  return 'muted'
 }
 
 async function submit(): Promise<void> {
@@ -189,6 +204,125 @@ onMounted(load)
           </tr>
         </tbody>
       </n-table>
+    </n-card>
+
+    <n-card title="组合视角" class="card">
+      <template #header-extra>
+        <n-space align="center" size="small">
+          <n-tag size="tiny" :bordered="false" type="info">
+            权重口径：{{ portfolio?.weightBasis === 'position' ? '按持仓市值' : '等权' }}
+          </n-tag>
+          <n-tag size="tiny" :bordered="false">前十大重仓口径</n-tag>
+        </n-space>
+      </template>
+
+      <n-empty v-if="!portfolio || portfolio.fundCount === 0" description="暂无自选基金，先在「我的基金」添加" />
+      <template v-else>
+        <div class="totals">
+          <div class="total-item">
+            <div class="total-label">自选基金</div>
+            <div class="total-value">{{ portfolio.fundCount }}</div>
+          </div>
+          <div class="total-item">
+            <div class="total-label">已知个股暴露</div>
+            <div class="total-value">{{ portfolio.totalExposure.toFixed(2) }}%</div>
+          </div>
+          <div class="total-item">
+            <div class="total-label">涉及个股</div>
+            <div class="total-value">{{ portfolio.stockCount }}</div>
+          </div>
+          <div class="total-item">
+            <div class="total-label">Top3 集中度（占已知暴露）</div>
+            <div class="total-value">{{ portfolio.concentration.top3.toFixed(1) }}%</div>
+          </div>
+          <div class="total-item">
+            <div class="total-label">HHI</div>
+            <div class="total-value">{{ portfolio.concentration.hhi.toFixed(3) }}</div>
+          </div>
+        </div>
+
+        <n-alert v-if="highStocks.length > 0" type="warning" :bordered="false" class="portfolio-alert">
+          隐性集中度：{{ highStocks.map((s) => `${s.stockName ?? s.key} ${s.exposure.toFixed(1)}%`).join('、') }}
+          ——单只股票在组合内合计暴露已达 {{ CONCENTRATION_WARN_PCT }}% 以上，多只基金很可能买的是同一批股票。
+        </n-alert>
+
+        <div class="sub-title">重仓股组合暴露（Top {{ portfolio.topStocks.length }}）</div>
+        <p v-if="portfolio.topStocks.length === 0" class="muted-line">暂无重仓股数据（基金季报持仓未采集）</p>
+        <n-table v-else size="small" :bordered="false">
+          <thead>
+            <tr>
+              <th>股票</th>
+              <th>组合暴露</th>
+              <th>基金数</th>
+              <th>涉及基金（组合贡献）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="s in portfolio.topStocks" :key="s.key">
+              <td class="fund-cell">
+                <div class="fund-name">{{ s.stockName ?? s.key }}</div>
+                <div class="fund-code">{{ s.stockCode ?? '--' }}</div>
+              </td>
+              <td :class="s.high ? 'risk-high' : ''">{{ s.exposure.toFixed(2) }}%</td>
+              <td>{{ s.fundCount }}</td>
+              <td class="chips">
+                <span v-for="f in s.funds" :key="f.code" class="chip">{{ f.name }} {{ f.contribution.toFixed(2) }}%</span>
+              </td>
+            </tr>
+          </tbody>
+        </n-table>
+
+        <div class="sub-title">重仓股重叠（{{ portfolio.overlaps.length }} 对）</div>
+        <p v-if="portfolio.overlaps.length === 0" class="muted-line">未发现共同重仓股（或持仓数据不足）</p>
+        <n-table v-else size="small" :bordered="false">
+          <thead>
+            <tr>
+              <th>基金对</th>
+              <th>共同重仓</th>
+              <th>重叠度</th>
+              <th>共同股票（各自权重）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="o in portfolio.overlaps" :key="o.fundA.code + o.fundB.code">
+              <td>{{ o.fundA.name }} × {{ o.fundB.name }}</td>
+              <td>{{ o.commonCount }} 只</td>
+              <td :class="o.overlapPct >= 50 ? 'risk-high' : o.overlapPct >= 25 ? 'risk-mid' : ''">
+                {{ o.overlapPct.toFixed(1) }}%
+              </td>
+              <td class="chips">
+                <span v-for="c in o.commonStocks" :key="c.stockCode ?? c.stockName ?? ''" class="chip">
+                  {{ c.stockName ?? c.stockCode }}（{{ c.weightA.toFixed(1) }}/{{ c.weightB.toFixed(1) }}%）
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </n-table>
+
+        <div class="sub-title">基金相关性（日收益，需 ≥ 20 个共同交易日）</div>
+        <p v-if="portfolio.correlations.length === 0" class="muted-line">共同交易日不足，暂无法计算</p>
+        <n-table v-else size="small" :bordered="false">
+          <thead>
+            <tr>
+              <th>基金对</th>
+              <th>相关系数</th>
+              <th>共同交易日</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="c in portfolio.correlations" :key="c.fundA.code + c.fundB.code">
+              <td>{{ c.fundA.name }} × {{ c.fundB.name }}</td>
+              <td :class="corrClass(c.corr)">{{ c.corr.toFixed(3) }}</td>
+              <td>{{ c.commonDays }}</td>
+            </tr>
+          </tbody>
+        </n-table>
+
+        <p class="portfolio-hint">
+          暴露 = Σ（基金组合权重 × 该股在基金内权重），仅统计前十大重仓股，故合计暴露通常低于 100%。
+          重叠度 = 共同持股 min 权重和 ÷ 较小基金权重合计，越高说明两只基金持仓越像。相关系数 ≥ 0.8 表示同涨同跌严重、分散效果有限。
+        </p>
+      </template>
     </n-card>
 
     <n-card class="card">
@@ -335,6 +469,55 @@ onMounted(load)
 }
 
 .muted {
+  color: var(--text-color-3);
+}
+
+/* ---------- 组合视角 ---------- */
+
+.risk-high {
+  color: #e5484d;
+  font-weight: 700;
+}
+
+.risk-mid {
+  color: #d48806;
+}
+
+.portfolio-alert {
+  margin: 8px 0 4px;
+}
+
+.sub-title {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.muted-line {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-color-3);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 3px;
+  background: var(--action-color, rgba(128, 128, 128, 0.12));
+  color: var(--text-color-2);
+}
+
+.portfolio-hint {
+  margin: 14px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
   color: var(--text-color-3);
 }
 

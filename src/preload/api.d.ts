@@ -106,6 +106,46 @@ interface FundDetail {
   estimate: EstPoint[]
   holdings: { reportDate: string | null; rows: HoldingWithStock[] }
   advice: AdviceRow[]
+  adviceReview: AdviceReview
+}
+
+// ---------- AI 建议复盘（analyzer/review 计算，随 fund:detail 返回） ----------
+// 入场日 = 建议交易日之后第一个交易日；后续 h 日涨跌 = 入场日后第 h 个交易日 / 入场日 - 1。
+
+interface AdviceReviewItem {
+  id: number
+  tradeDate: string
+  action: string
+  confidence: number | null
+  entryDate: string | null
+  entryNav: number | null
+  returns: (number | null)[] // 与 horizons 对齐的后续涨跌 %
+  hits: (boolean | null)[] // 与 horizons 对齐；hold 恒 null（无方向）
+}
+
+interface AdviceReviewStat {
+  horizon: number
+  evaluated: number // 已满期条数（含 hold，用于判断"有无可复盘数据"）
+  matured: number // 已满期的 add/reduce 条数（命中率分母）
+  hits: number
+  hitRate: number | null // 命中率 %
+  addTotal: number
+  addHit: number
+  reduceTotal: number
+  reduceHit: number
+  avgRetAdd: number | null
+  avgRetReduce: number | null
+  avgRetHold: number | null
+  highConfTotal: number // 已满期且置信度 ≥70 的 add/reduce 条数
+  highConfHit: number
+  lowConfTotal: number
+  lowConfHit: number
+}
+
+interface AdviceReview {
+  horizons: number[]
+  items: AdviceReviewItem[]
+  stats: AdviceReviewStat[]
 }
 
 // AI 分析运行结果（advice:analyze 返回）
@@ -246,6 +286,45 @@ interface EstimateDiffStat {
   latestNav: number | null
 }
 
+// ---------- 组合视角（portfolio:analysis 返回，纯函数见 main/portfolio/portfolio.ts） ----------
+
+interface PortfolioStockExposure {
+  key: string
+  stockCode: string | null
+  stockName: string | null
+  exposure: number // 组合层面暴露 %（Σ 基金权重 × 基金内权重）
+  fundCount: number
+  funds: { code: string; name: string; weight: number; contribution: number }[]
+  high: boolean // 是否达到集中度提示阈值
+}
+
+interface PortfolioOverlapPair {
+  fundA: { code: string; name: string }
+  fundB: { code: string; name: string }
+  commonCount: number
+  overlapPct: number // 重叠度 %：共同持股 min 权重和 / 较小基金权重合计
+  commonStocks: { stockCode: string | null; stockName: string | null; weightA: number; weightB: number }[]
+}
+
+interface PortfolioFundCorrelation {
+  fundA: { code: string; name: string }
+  fundB: { code: string; name: string }
+  commonDays: number
+  corr: number
+}
+
+interface PortfolioAnalysis {
+  fundCount: number
+  weightBasis: 'position' | 'equal' // 组合权重口径：按持仓市值 / 等权
+  funds: { code: string; name: string; weight: number; marketValue: number | null }[]
+  totalExposure: number // 已知重仓股合计暴露 %（前十大口径，< 100 正常）
+  stockCount: number
+  concentration: { top1: number; top3: number; top5: number; hhi: number }
+  topStocks: PortfolioStockExposure[]
+  overlaps: PortfolioOverlapPair[]
+  correlations: PortfolioFundCorrelation[]
+}
+
 // ---------- 多用户（M9） ----------
 
 interface AppUserRow {
@@ -283,6 +362,7 @@ interface FundApi {
   positionAddTrade: (t: TradeInput) => Promise<{ id: number; summary: PositionSummary }>
   positionDeleteTrade: (id: number) => Promise<boolean>
   positionProfile: (patch?: { buyFeePct?: number; sellFeePct?: number }) => Promise<FundProfile>
+  portfolioAnalysis: () => Promise<PortfolioAnalysis>
   newsRecent: (limit?: number) => Promise<NewsRow[]>
   configGet: () => Promise<AppConfig>
   configSave: (patch: Record<string, unknown>) => Promise<AppConfig>

@@ -160,7 +160,7 @@ if (process.argv.includes('--check')) {
     }
   })
 } else if (process.argv.includes('--screenshot')) {
-  // 开发辅助：electron . --screenshot <path> [--route <hash>]
+  // 开发辅助：electron . --screenshot <path> [--route <hash>] [--wait <ms>]
   // 加载完成等待渲染后截屏保存（配合 M5 前端验证）
   const idx = process.argv.indexOf('--screenshot')
   const shotPath = process.argv[idx + 1]
@@ -184,8 +184,10 @@ if (process.argv.includes('--check')) {
         try {
           // 路由就绪后再切 hash（executeJavaScript 在 did-finish-load 前执行会被 Vue 路由初始化覆盖）
           await win.webContents.executeJavaScript(`window.location.hash = '#' + ${JSON.stringify(hashRoute)}`).catch(() => {})
-          // 等 Vue 路由渲染（hashchange → 组件挂载）
-          await new Promise((res) => setTimeout(res, 800))
+          // 等 Vue 路由渲染（hashchange → 组件挂载）；懒加载路由（详情页 chunk 含 ECharts，约 2.8MB）需更久，用 --wait 调大
+          const waitIdx = process.argv.indexOf('--wait')
+          const settleMs = waitIdx >= 0 ? Number(process.argv[waitIdx + 1]) || 800 : 800
+          await new Promise((res) => setTimeout(res, settleMs))
           const curHash = await win.webContents.executeJavaScript('location.hash').catch(() => '')
           console.log('[screenshot] hash:', curHash)
           // 开发验证：--expand-form 时点击"录入交易"按钮展开表单（持仓页截图用）
