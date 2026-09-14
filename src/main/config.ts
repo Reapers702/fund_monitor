@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 
 // 配置结构（与计划书 §7.5 一致）
@@ -48,6 +48,23 @@ const DEFAULTS: AppConfig = {
 /** 应用专属配置文件路径：userData/config.json */
 export function configPath(): string {
   return join(app.getPath('userData'), 'config.json')
+}
+
+/** 旧版中文 productName 目录（基金监控与AI推荐系统）里的配置：新 userData 无 config.json 时复制过来 */
+const LEGACY_USER_DATA_NAME = '基金监控与AI推荐系统'
+
+function migrateLegacyUserData(): void {
+  try {
+    const newCfg = join(app.getPath('userData'), 'config.json')
+    if (existsSync(newCfg)) return // 新目录已有配置，无需迁移
+    const legacyCfg = join(app.getPath('appData'), LEGACY_USER_DATA_NAME, 'config.json')
+    if (!existsSync(legacyCfg)) return
+    mkdirSync(dirname(newCfg), { recursive: true })
+    copyFileSync(legacyCfg, newCfg)
+    console.log(`[config] 已从旧目录迁移配置: ${legacyCfg} -> ${newCfg}`)
+  } catch (e) {
+    console.error(`[config] 旧配置迁移失败:`, (e as Error).message)
+  }
 }
 
 /** 项目根 .env（开发回退）：仅在首次生成模板时迁移到 config.json */
@@ -164,6 +181,7 @@ function resolveAiFund(cfg: AppConfig): void {
 
 /** 首次运行生成模板（含 .env 迁移）；已存在则直接读取 */
 export function ensureConfigFile(): AppConfig {
+  migrateLegacyUserData()
   const path = configPath()
   if (!existsSync(path)) {
     mkdirSync(dirname(path), { recursive: true })
@@ -177,6 +195,7 @@ export function ensureConfigFile(): AppConfig {
 }
 
 export function loadConfig(): AppConfig {
+  migrateLegacyUserData()
   const path = configPath()
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>

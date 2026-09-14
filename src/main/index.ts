@@ -19,6 +19,10 @@ import { redirectUserData } from './userData'
 // 必须先于 config.ts configPath / logger.ts initLogger 对 userData 的读取。
 redirectUserData()
 
+// 统一 userData 目录名为 fund_monitor（避免 macOS 用中文 productName 生成中文目录）。
+// 必须在任何 app.getPath('userData') 调用之前执行。
+app.setName('fund_monitor')
+
 function createWindow(): BrowserWindow {
   // 主窗口（渲染进程 UI；爬虫走主进程 Node 通道 + 隐藏窗口，不依赖此窗口）
   const mainWindow = new BrowserWindow({
