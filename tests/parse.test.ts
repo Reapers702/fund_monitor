@@ -9,6 +9,7 @@ describe('parseAdvice', () => {
       action: 'add',
       confidence: 78,
       reason: '近期指数走强，重仓股普涨',
+      suggestedPct: null, // 该输出未给建议仓位
       raw: '{"action":"add","confidence":78,"reason":"近期指数走强，重仓股普涨"}'
     })
   })
@@ -49,5 +50,23 @@ describe('parseAdvice', () => {
 
   it('confidence 非数字返回 null', () => {
     expect(parseAdvice('{"action":"add","confidence":"高","reason":"x"}')).toBeNull()
+  })
+
+  it('suggestedPct：解析 0~100 的数字，越界裁剪、保留两位', () => {
+    expect(parseAdvice('{"action":"add","confidence":70,"reason":"x","suggestedPct":25}')?.suggestedPct).toBe(25)
+    expect(parseAdvice('{"action":"add","confidence":70,"reason":"x","suggestedPct":33.333}')?.suggestedPct).toBe(33.33)
+    expect(parseAdvice('{"action":"add","confidence":70,"reason":"x","suggestedPct":150}')?.suggestedPct).toBe(100)
+    expect(parseAdvice('{"action":"add","confidence":70,"reason":"x","suggestedPct":-5}')?.suggestedPct).toBe(0)
+  })
+
+  it('suggestedPct 缺失/为 null/非数字 → null，且不影响整条建议成立', () => {
+    // 老 prompt 没有该字段：必须容错，否则历史/其他模型的输出会被整体判非法
+    const noField = parseAdvice('{"action":"add","confidence":70,"reason":"x"}')
+    expect(noField).not.toBeNull()
+    expect(noField?.suggestedPct).toBeNull()
+
+    expect(parseAdvice('{"action":"add","confidence":70,"reason":"x","suggestedPct":null}')?.suggestedPct).toBeNull()
+    expect(parseAdvice('{"action":"add","confidence":70,"reason":"x","suggestedPct":"高"}')?.suggestedPct).toBeNull()
+    expect(parseAdvice('{"action":"add","confidence":70,"reason":"x","suggestedPct":""}')?.suggestedPct).toBeNull()
   })
 })

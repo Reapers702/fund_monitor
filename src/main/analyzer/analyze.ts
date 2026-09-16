@@ -4,17 +4,18 @@
 // 输出：固定 JSON { action, confidence, reason }，写 ds_advice 保留 response_raw；action != hold 触发桌面通知
 import type { Pool } from 'pg'
 import { chatComplete, hasDeepseekKey, DeepseekError } from '../llm/deepseek'
-import { navSeries, latestHoldings, fundBasic, estimateSeries } from '../storage/queries'
-import type { EstPoint } from '../storage/queries'
+import { navSeries, latestHoldings, fundBasic, estimateSeries, listFunds, latestHoldingsBatch, navSeriesBatch } from '../storage/queries'
+import type { EstPoint, NavPoint, HoldingWithStock } from '../storage/queries'
 import { newsByTags } from '../news/reader'
-import { computePosition } from '../position/position'
+import { computePosition, listPositions } from '../position/position'
 import type { PositionSummary } from '../position/position'
+import { analyzePortfolio, formatPortfolioContext } from '../portfolio/portfolio'
 import { createAiFundPool } from '../storage/db'
 import { isIntraday, isAfterClose } from '../scheduler/time'
 import { isTradingDay as isTradingDayCal } from '../scheduler/tradingCalendar'
-import { klinesBySecid } from '../crawler/market'
 import { computeFundMetrics, computeRelativeStrength, formatMetricsBlock } from './metrics'
-import type { NavLike } from './metrics'
+import { BENCHMARK_NAME, loadBenchmarkNav } from '../crawler/benchmark'
+import { ESTIMATE_SOURCE_NAMES } from '../crawler/estimate'
 import { parseAdvice } from './parse'
 
 export interface AnalyzeInput {
@@ -27,6 +28,8 @@ export interface AnalyzeResult {
   action: 'add' | 'reduce' | 'hold'
   confidence: number
   reason: string
+  /** 建议该基金占组合比例 %（模型未给出为 null） */
+  suggestedPct: number | null
   raw: string
 }
 
@@ -76,45 +79,19 @@ export function formatTimeContext(t: TimeContext): string {
   return `分析时点：${t.date}（周${t.weekday}，${dayTag}，${t.phase}）。${navTag}。`
 }
 
-const SYSTEM_PROMPT = `你是基金投资分析助手。基于给定的场外基金数据（日净值走势、量化指标、盘中估值、重仓股近期表现、相关新闻），给出独立的 加仓/减仓/持有 建议。
+export const SYSTEM_PROMPT = `你是基金投资分析助手。基于给定的场外基金数据（日净值走势、量化指标、盘中估值、重仓股近期表现、相关新闻），给出独立的 加仓/减仓/持有 建议。
 规则：
 1. 只依据提供的数据判断，不编造未提供的信息。
 2. 输出且仅输出一个 JSON 对象，不要包含任何其他文字、markdown 代码块或解释。
-3. JSON 格式严格为：{"action":"add|reduce|hold","confidence":0~100,"reason":"中文理由，150字以内"}。
+3. JSON 格式严格为：{"action":"add|reduce|hold","confidence":0~100,"reason":"中文理由，150字以内","suggestedPct":0~100 或 null}。
 4. action 含义：add=当前值得加仓；reduce=当前值得减仓/止盈；hold=继续持有观望。
 5. 盘中估值为预测值、存在误差，仅供盘中参考；判断优先以收盘确认净值为准。
-6. 量化指标（年化收益/波动率/夏普/最大回撤/相对沪深300超额）已算好，直接用于判断风险收益特征与相对强弱，不要自行重算。`
+6. 量化指标（年化收益/波动率/夏普/最大回撤/相对沪深300超额）已算好，直接用于判断风险收益特征与相对强弱，不要自行重算。
+7. 若给出了「组合上下文」，必须纳入判断：该基金与组合内其他基金高度重叠或高相关时，加仓是放大同一风险敞口而非分散风险，此时应更谨慎并说明；已在组合层面暴露过高的个股同理。
+8. suggestedPct = 建议该基金占整个基金组合的比例（%），是给用户的执行数量参考：加仓给出高于当前的比例、减仓给出低于当前的比例、持有可给出与当前持平的比例；无持仓信息或无法判断时填 null。`
 
-/** 相对基准指数（沪深300）——用于计算基金超额收益，secid 见 crawler/market */
-const BENCHMARK_SECID = '1.000300'
-const BENCHMARK_NAME = '沪深300'
-/** 基准日 K 进程内缓存：analyze-all 会对同一基准重复请求，30 分钟内复用 */
-const BENCHMARK_TTL_MS = 30 * 60_000
-let benchmarkCache: { ts: number; nav: NavLike[] } | null = null
-
-/** 取基准指数日 K（失败/为空返回 null，不阻断分析）；带 30 分钟缓存 */
-async function loadBenchmarkNav(): Promise<NavLike[] | null> {
-  if (benchmarkCache && Date.now() - benchmarkCache.ts < BENCHMARK_TTL_MS) return benchmarkCache.nav
-  try {
-    const { rows } = await klinesBySecid(BENCHMARK_SECID, 260)
-    const nav = rows
-      .filter((r) => r.close !== null && r.close > 0)
-      .map((r) => ({ date: r.tradeDate, nav: r.close as number }))
-    if (nav.length === 0) return null
-    benchmarkCache = { ts: Date.now(), nav }
-    return nav
-  } catch (e) {
-    console.warn(`[analyze] 基准 ${BENCHMARK_NAME} 日K获取失败（相对强弱省略）: ${(e as Error).message}`)
-    return null
-  }
-}
-
-/** 估值来源 → 中文说明（T1/T2/T3 对应 crawler/estimate.ts 的 source） */
-const SOURCE_NAMES: Record<string, string> = {
-  tracking_index: '跟踪指数',
-  theme_etf: '主题ETF',
-  holdings_weighted: '重仓股加权'
-}
+/** 估值来源 → 中文说明（与 alerts/UI 共用一份，见 crawler/estimate.ts） */
+const SOURCE_NAMES = ESTIMATE_SOURCE_NAMES
 
 /**
  * 盘中估值块：把当日采样抽稀成给 AI 看的走势文本。
@@ -147,17 +124,24 @@ export function formatEstimateBlock(estimate: EstPoint[], today = dateStr(new Da
 ${picked.map((p) => `${hm(p)} ${pct(p)}`).join('\n')}`
 }
 
-function buildUserPrompt(
-  fundName: string,
-  code: string,
-  nav: Awaited<ReturnType<typeof navSeries>>,
-  holdings: Awaited<ReturnType<typeof latestHoldings>>,
-  news: { title: string | null; summary: string | null; sentiment: string | null; llmTags: string[] }[],
-  position: PositionSummary | null,
-  timeCtx: string,
-  estimate: Awaited<ReturnType<typeof estimateSeries>>,
-  metricsBlock: string | null = null
-): string {
+/** 拼装 User Prompt（导出供单测：验证指标/持仓/新闻/时点各块确实进入提示词） */
+/** buildUserPrompt 的输入（字段渐多，改用对象传参，避免长位置参数顺序错位） */
+export interface PromptInput {
+  fundName: string
+  code: string
+  nav: NavPoint[]
+  holdings: { reportDate: string | null; rows: HoldingWithStock[] }
+  news: { title: string | null; summary: string | null; sentiment: string | null; llmTags: string[] }[]
+  position: PositionSummary | null
+  timeCtx: string
+  estimate: EstPoint[]
+  metricsBlock: string | null
+  portfolioBlock: string | null
+}
+
+/** 拼装 User Prompt（导出供单测：验证指标/组合/持仓/新闻/时点各块确实进入提示词） */
+export function buildUserPrompt(input: PromptInput): string {
+  const { fundName, code, nav, holdings, news, position, timeCtx, estimate, metricsBlock, portfolioBlock } = input
   const latestNav = nav[nav.length - 1]
   const firstNav = nav[0]
   const periodPct = firstNav && firstNav.nav > 0 ? (((latestNav.nav - firstNav.nav) / firstNav.nav) * 100).toFixed(2) : null
@@ -188,7 +172,7 @@ function buildUserPrompt(
 基金：${fundName}（${code}）
 净值样本数：${nav.length} 条；区间涨跌：${periodPct ?? '--'}%（近${nav.length}个交易日，归一化起点）
 最新净值：${latestNav.nav.toFixed(4)}（${latestNav.date}），当日涨跌 ${latestNav.changePct === null ? '--' : latestNav.changePct.toFixed(2)}%
-${estBlock ? estBlock + '\n' : ''}${metricsBlock ? metricsBlock + '\n' : ''}${posLines}
+${estBlock ? estBlock + '\n' : ''}${metricsBlock ? metricsBlock + '\n' : ''}${portfolioBlock ? portfolioBlock + '\n' : ''}${posLines}
 
 近 30 日净值：
 ${navLines}
@@ -207,6 +191,38 @@ ${newsLines || '（无相关新闻）'}
 export interface AnalyzeContext {
   pool: Pool
   aiFundPool: Pool
+}
+
+/**
+ * 组合上下文：该基金在用户组合中的位置（与哪些基金重仓重叠 / 相关性高、是否构成组合级集中度）。
+ * 只有一只自选基金、或无重叠无相关性时返回 null（不拼空块）。失败不阻断分析。
+ */
+async function loadPortfolioContext(pool: Pool, userId: number, code: string): Promise<string | null> {
+  try {
+    const funds = await listFunds(pool, userId)
+    const active = funds.filter((f) => f.isActive === 1)
+    if (active.length < 2) return null
+    const codes = active.map((f) => f.code)
+    const [holds, navs, positions] = await Promise.all([
+      latestHoldingsBatch(pool, codes),
+      navSeriesBatch(pool, codes, 180),
+      listPositions(pool, userId)
+    ])
+    const mv = new Map(positions.map((p) => [p.fundCode, p.marketValue]))
+    const analysis = analyzePortfolio(
+      active.map((f) => ({
+        code: f.code,
+        name: f.name,
+        marketValue: mv.get(f.code) ?? null,
+        holdings: holds.get(f.code) ?? [],
+        nav: navs.get(f.code) ?? []
+      }))
+    )
+    return formatPortfolioContext(analysis, code)
+  } catch (e) {
+    console.warn(`[analyze] ${code} 组合上下文计算失败（忽略继续）: ${(e as Error).message}`)
+    return null
+  }
 }
 
 /** 单基金 AI 分析主流程；返回 null 表示跳过（未配置 Key / 数据不足 / 解析失败）。
@@ -283,7 +299,21 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     console.warn(`[analyze] ${code} 量化指标计算失败（忽略继续）: ${(e as Error).message}`)
   }
 
-  const userPrompt = buildUserPrompt(basic.name, code, nav, holdings, news, position, timeCtx, estimate, metricsBlock)
+  // 组合上下文：单基金判断看不到"和已有基金是不是同一批股票"，这里补上
+  const portfolioBlock = await loadPortfolioContext(pool, userId, code)
+
+  const userPrompt = buildUserPrompt({
+    fundName: basic.name,
+    code,
+    nav,
+    holdings,
+    news,
+    position,
+    timeCtx,
+    estimate,
+    metricsBlock,
+    portfolioBlock
+  })
   const raw = await chatComplete(
     [
       { role: 'system', content: SYSTEM_PROMPT },
@@ -303,9 +333,9 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
 /** 写 ds_advice（含原始响应留痕）；返回是否新插入。userId：建议归属用户（多用户 M9） */
 export async function saveAdvice(pool: Pool, code: string, r: AnalyzeResult, tradeDate: string, userId = 1): Promise<boolean> {
   const res = await pool.query(
-    `INSERT INTO ds_advice (fund_code, trade_date, action, reason, confidence, response_raw, user_id, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
-    [code, tradeDate, r.action, r.reason, r.confidence, JSON.stringify({ raw: r.raw }), userId]
+    `INSERT INTO ds_advice (fund_code, trade_date, action, reason, confidence, suggested_pct, response_raw, user_id, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())`,
+    [code, tradeDate, r.action, r.reason, r.confidence, r.suggestedPct, JSON.stringify({ raw: r.raw }), userId]
   )
   return (res.rowCount ?? 0) > 0
 }

@@ -125,7 +125,21 @@ export const SCHEMA_STATEMENTS: string[] = [
       user_id      INT PRIMARY KEY,
       buy_fee_pct  NUMERIC(6,4) NOT NULL DEFAULT 0,
       sell_fee_pct NUMERIC(6,4) NOT NULL DEFAULT 0
-  )`
+  )`,
+
+  // 提醒去重：同一用户同一基金的同类提醒每天只推一次（插入冲突即表示已推过）。
+  // fund_code 用 '' 表示"与具体基金无关"的提醒——PG 唯一约束中 NULL 互不相等，故不能留 NULL。
+  `CREATE TABLE IF NOT EXISTS alert_log (
+      id         BIGSERIAL PRIMARY KEY,
+      user_id    INT NOT NULL,
+      fund_code  VARCHAR(8) NOT NULL DEFAULT '',
+      alert_type VARCHAR(24) NOT NULL,
+      trade_date DATE NOT NULL,
+      detail     TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_alert_log UNIQUE (user_id, fund_code, alert_type, trade_date)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_alert_log ON alert_log (trade_date DESC)`
 ]
 
 // 单用户 → 多用户迁移（幂等，仅对已有旧库生效；新库直接走 SCHEMA_STATEMENTS 新结构）：
@@ -146,6 +160,8 @@ export const MIGRATION_STATEMENTS: string[] = [
   `UPDATE fund_trade SET user_id = 1 WHERE user_id IS NULL`,
   `ALTER TABLE ds_advice ADD COLUMN IF NOT EXISTS user_id INT`,
   `UPDATE ds_advice SET user_id = 1 WHERE user_id IS NULL`,
+  // AI 建议附带"建议仓位占组合比例 %"（可选字段：老记录/模型未给出时为 NULL）
+  `ALTER TABLE ds_advice ADD COLUMN IF NOT EXISTS suggested_pct NUMERIC(6,2)`,
 
   // 费率表重建为按用户（旧结构 id=1 单行 → 新结构 user_id 主键），存量归 guanxin
   `DO $$ BEGIN

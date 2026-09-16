@@ -15,15 +15,18 @@ import {
   latestHoldingsBatch,
   navSeriesBatch
 } from './storage/queries'
-import { analyzePortfolio } from './portfolio/portfolio'
+import { analyzePortfolio, currentWeightPct } from './portfolio/portfolio'
 import { findTrackingIndex } from './crawler/estimate'
 import { syncFund } from './fund'
 import { analyzeFund, saveAdvice, todayStr } from './analyzer/analyze'
 import { evaluateAdviceReviews } from './analyzer/review'
+import { computeFundMetrics, computeRelativeStrength } from './analyzer/metrics'
+import { BENCHMARK_NAME, loadBenchmarkNav, clearBenchmarkCache } from './crawler/benchmark'
 import { notifyAdvice } from './notifier'
 import { runQuotesCore } from './quotes'
 import { runAnalyzeAllCore } from './analyze'
 import { getSchedulerState } from './scheduler'
+import { runAlertCheck } from './alerts/run'
 import { computePosition, listPositions, listTrades, addTrade, deleteTrade, getProfile, saveProfile } from './position/position'
 import type { TradeRow } from './position/position'
 import { getCurrentUserId, setCurrentUserId, ensureDefaultUser, listUsers, createUser } from './user'
@@ -174,12 +177,14 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     try {
       const uid = getCurrentUserId()
       // 净值/建议一次取足（净值 400 日覆盖 1 年+复盘、建议 200 条）：展示用切片，复盘用全量，避免重复查库
-      const [basic, navAll, est, holdings, adviceAll] = await Promise.all([
+      const [basic, navAll, est, holdings, adviceAll, benchNav, positions] = await Promise.all([
         fundBasic(pool, code),
         navSeries(pool, code, 400),
         estimateSeries(pool, code),
         latestHoldings(pool, code),
-        adviceList(pool, code, uid, 200)
+        adviceList(pool, code, uid, 200),
+        loadBenchmarkNav(), // 基准失败返回 null → 只给基金自身指标，不阻断详情页
+        listPositions(pool, uid)
       ])
       return {
         basic,
@@ -187,7 +192,10 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
         estimate: est,
         holdings,
         advice: adviceAll.slice(0, 20),
-        adviceReview: evaluateAdviceReviews(adviceAll, navAll)
+        adviceReview: evaluateAdviceReviews(adviceAll, navAll),
+        metrics: computeFundMetrics(navAll),
+        relativeStrength: benchNav ? computeRelativeStrength(navAll, benchNav, [20, 60], BENCHMARK_NAME) : null,
+        currentWeightPct: currentWeightPct(positions, code)
       }
     } finally {
       await pool.end().catch(() => {})
@@ -226,6 +234,7 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     const pool = createPool(cfg)
     try {
       await ensureSchema(pool)
+      clearBenchmarkCache() // 手动刷新后基准也用最新的，避免超额收益停留在 30 分钟前的缓存
       const r = await runQuotesCore(pool)
       return { ok: true, error: null, result: r }
     } catch (e) {
@@ -400,6 +409,32 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     }
   })
 
+  // 手动触发提醒检查（设置页"立即检查提醒"）：盘中(估值异动) + 盘后(净值/估值失真/止盈止损/负面新闻) 两轮都跑，
+  // 与 CLI --alerts 一致；同一天同类已推过的不重复推（alert_log 去重）
+  ipcMain.handle('alerts:run', async (): Promise<AlertRunResult> => {
+    const cfg = loadConfig()
+    const pool = createPool(cfg)
+    const aiFundPool = createAiFundPool(cfg)
+    try {
+      await ensureSchema(pool)
+      const merged: AlertRunResult = { evaluated: 0, triggered: 0, notified: 0, items: [] }
+      for (const scope of ['intraday', 'close'] as const) {
+        const r = await runAlertCheck(pool, aiFundPool, cfg, scope)
+        merged.evaluated += r.evaluated
+        merged.triggered += r.triggered
+        merged.notified += r.notified
+        merged.items.push(...r.items)
+      }
+      return merged
+    } catch (e) {
+      console.error('[ipc] alerts:run 失败:', (e as Error).message)
+      throw e
+    } finally {
+      await pool.end().catch(() => {})
+      await aiFundPool.end().catch(() => {})
+    }
+  })
+
   // ---------- 配置 ----------
 
   // 后台调度器状态（设置页展示）
@@ -412,7 +447,7 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
   ipcMain.handle('config:save', (_e, patch: Record<string, unknown>): AppConfig => {
     const cfg = loadConfig()
     // 只允许白名单字段覆盖（防渲染进程写入任意键）
-    const allowed = new Set(['deepseek', 'fetcher', 'analyzer', 'fetch', 'funds'])
+    const allowed = new Set(['deepseek', 'fetcher', 'analyzer', 'alerts', 'fetch', 'funds'])
     for (const key of Object.keys(patch)) {
       if (allowed.has(key)) {
         ;(cfg as unknown as Record<string, unknown>)[key] = patch[key]

@@ -37,7 +37,8 @@ const api: FundApi = {
 
   configGet: (): Promise<AppConfig> => ipcRenderer.invoke('config:get'),
   configSave: (patch: Record<string, unknown>): Promise<AppConfig> => ipcRenderer.invoke('config:save', patch),
-  schedulerStatus: (): Promise<SchedulerStatus> => ipcRenderer.invoke('scheduler:status')
+  schedulerStatus: (): Promise<SchedulerStatus> => ipcRenderer.invoke('scheduler:status'),
+  alertsRun: (): Promise<AlertRunResult> => ipcRenderer.invoke('alerts:run')
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

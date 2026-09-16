@@ -25,6 +25,12 @@ export const DEFAULT_HORIZONS = [5, 10, 20] as const
 /** 置信度分档阈值：≥ 视为高置信（用于检验"高置信是否真更准"） */
 export const HIGH_CONFIDENCE = 70
 
+/**
+ * 命中率最小样本数：分母低于此值只展示"命中数/总数"、不折算成百分比。
+ * 5 个样本算出来的 0% 与 200 个样本的 0% 含义天差地别，给百分比会让人对噪声下判断。
+ */
+export const MIN_SAMPLE_FOR_RATE = 10
+
 export interface AdviceReviewItem {
   id: number
   tradeDate: string
@@ -57,6 +63,8 @@ export interface AdviceReviewStat {
 
 export interface AdviceReviewResult {
   horizons: number[]
+  /** 命中率最小样本数（随结果下发，避免渲染进程另存一份阈值导致口径漂移） */
+  minSampleForRate: number
   items: AdviceReviewItem[]
   stats: AdviceReviewStat[]
 }
@@ -184,5 +192,5 @@ export function evaluateAdviceReviews(
     }
   })
 
-  return { horizons: [...horizons], items, stats }
+  return { horizons: [...horizons], minSampleForRate: MIN_SAMPLE_FOR_RATE, items, stats }
 }

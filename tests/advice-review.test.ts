@@ -1,6 +1,6 @@
 // AI 建议复盘单测（analyzer/review）：入场日口径、命中判定、未满期处理、置信度分档
 import { describe, it, expect } from 'vitest'
-import { evaluateAdviceReviews, HIGH_CONFIDENCE } from '../src/main/analyzer/review'
+import { evaluateAdviceReviews, HIGH_CONFIDENCE, MIN_SAMPLE_FOR_RATE } from '../src/main/analyzer/review'
 import type { ReviewAdviceInput, ReviewNavPoint } from '../src/main/analyzer/review'
 
 /** 构造连续交易日的净值序列（date 为 2026-01-01 起的第 n 日，净值按传入数组） */
@@ -88,6 +88,16 @@ describe('evaluateAdviceReviews（建议后 N 日复盘）', () => {
     const b = evaluateAdviceReviews([advice(1, '2026-01-01', 'add')], shuffled, [3])
     expect(b.items[0].returns[0]).toBeCloseTo(a.items[0].returns[0]!, 6)
     expect(b.items[0].entryDate).toBe(a.items[0].entryDate)
+  })
+
+  it('命中率最小样本阈值随结果下发（渲染进程据此决定是否给百分比）', () => {
+    const nav = navs([1.0, 1.1, 1.2, 1.3])
+    const r = evaluateAdviceReviews([advice(1, '2026-01-01', 'add')], nav, [1])
+    expect(r.minSampleForRate).toBe(MIN_SAMPLE_FOR_RATE)
+    expect(MIN_SAMPLE_FOR_RATE).toBeGreaterThanOrEqual(5)
+    // 1 个样本远低于阈值：数据照常返回，由展示层决定不给百分比结论
+    expect(r.stats[0].matured).toBe(1)
+    expect(r.stats[0].matured).toBeLessThan(r.minSampleForRate)
   })
 
   it('add 后平均收益与 reduce 后平均收益分开统计', () => {

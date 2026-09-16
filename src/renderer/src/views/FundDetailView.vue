@@ -159,9 +159,16 @@ const reviewHorizons = computed(() => detail.value?.adviceReview.horizons ?? [])
 /** 是否已有满期可复盘样本（含 hold——hold 虽无方向，其后续收益仍有参考价值） */
 const hasReviewSamples = computed(() => reviewStats.value.some((s) => s.evaluated > 0))
 
-/** 命中率/占比 → 百分比文本，分母 0 显示 -- */
+/** 命中率最小样本数（由主进程下发，避免此处另存一份阈值） */
+const minSampleForRate = computed(() => detail.value?.adviceReview.minSampleForRate ?? 10)
+
+/** 样本不足的周期（有样本但达不到给结论的门槛），用于提示"别当结论看" */
+const insufficientHorizons = computed(() => reviewStats.value.filter((s) => s.evaluated > 0 && s.matured < minSampleForRate.value))
+
+/** 命中率/占比文本：样本不足时只给"命中数/总数"，不折算百分比（避免用噪声下结论） */
 function rate(hit: number, total: number): string {
   if (total <= 0) return '--'
+  if (total < minSampleForRate.value) return `${hit}/${total}(样本不足)`
   return `${((hit / total) * 100).toFixed(0)}%（${hit}/${total}）`
 }
 
@@ -174,6 +181,41 @@ function fmtRet(v: number | null | undefined): string {
 /** 取某条建议的复盘结果（模板内用，避免非空断言） */
 function revOf(id: number): AdviceReviewItem | undefined {
   return reviewItems.value.get(id)
+}
+
+// ---------- 量化指标（analyzer/metrics 计算，随 fund:detail 返回） ----------
+
+/** 指标卡展示项：值为 null 显示 --，涨跌类按 up/down 上色 */
+const metricItems = computed(() => {
+  const m = detail.value?.metrics
+  if (!m) return []
+  const pct = (v: number | null) => (v === null ? '--' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`)
+  return [
+    { label: '区间收益', text: pct(m.periodReturn), tone: m.periodReturn },
+    { label: '年化收益', text: pct(m.annualizedReturn), tone: m.annualizedReturn },
+    { label: '年化波动率', text: m.annualizedVol === null ? '--' : `${m.annualizedVol.toFixed(2)}%`, tone: null },
+    { label: '夏普比率', text: m.sharpe === null ? '--' : m.sharpe.toFixed(2), tone: m.sharpe },
+    { label: '最大回撤', text: pct(m.maxDrawdown), tone: m.maxDrawdown },
+    { label: '当前回撤', text: pct(m.currentDrawdown), tone: m.currentDrawdown },
+    { label: '日涨占比', text: m.winRate === null ? '--' : `${m.winRate.toFixed(1)}%`, tone: null },
+    { label: '近 20 日', text: pct(m.ret20), tone: m.ret20 },
+    { label: '近 60 日', text: pct(m.ret60), tone: m.ret60 },
+    {
+      label: '20 日均线',
+      text: m.ma20 === null ? '--' : m.ma20.toFixed(4),
+      tone: null,
+      extra: m.aboveMa20 === null ? '' : m.aboveMa20 ? '上方' : '下方'
+    }
+  ]
+})
+
+/** 相对基准超额（基准取不到时为空数组，卡片只显示基金自身指标） */
+const excessItems = computed(() => detail.value?.relativeStrength?.windows.filter((w) => w.excess !== null) ?? [])
+
+/** 夏普等指标取 null 时不参与涨跌配色 */
+function toneClass(tone: number | null): string {
+  if (tone === null) return 'muted'
+  return tone > 0 ? 'up' : tone < 0 ? 'down' : 'muted'
 }
 
 // ---------- AI 分析 ----------
@@ -290,6 +332,36 @@ watch(
           <p v-if="detail.nav.length === 0" class="chart-empty">暂无净值数据，请先执行 --fund {{ code }} 补数据。</p>
         </n-card>
 
+        <n-card title="量化指标" class="metric-card">
+          <template #header-extra>
+            <span class="metric-note">
+              AI 分析依据（近 {{ detail.metrics.sampleDays }} 个交易日，年化按 244 交易日）
+            </span>
+          </template>
+          <div class="metric-grid">
+            <div v-for="it in metricItems" :key="it.label" class="metric-item">
+              <div class="metric-label">{{ it.label }}</div>
+              <div class="metric-value" :class="toneClass(it.tone)">
+                {{ it.text }}<span v-if="it.extra" class="metric-extra">{{ it.extra }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="excessItems.length > 0" class="excess-row">
+            <span class="metric-label">相对{{ detail.relativeStrength?.benchmark }}超额</span>
+            <n-tag
+              v-for="w in excessItems"
+              :key="w.window"
+              size="small"
+              :bordered="false"
+              :type="(w.excess ?? 0) >= 0 ? 'success' : 'error'"
+            >
+              近 {{ w.window }} 日 {{ fmtPct(w.excess) }}
+              <span class="excess-detail">（基金 {{ fmtPct(w.fundRet) }} / 基准 {{ fmtPct(w.benchRet) }}）</span>
+            </n-tag>
+          </div>
+          <p v-else class="metric-note muted">基准指数日K暂不可用，本次只展示基金自身指标。</p>
+        </n-card>
+
         <n-card title="重仓股（近10日表现）" class="hold-card">
           <n-empty v-if="detail.holdings.rows.length === 0" description="暂无持仓数据" />
           <n-table v-else size="small" :bordered="false">
@@ -336,6 +408,10 @@ watch(
                 <span class="advice-date">{{ fmtDateTime(a.createdAt) }}</span>
                 <span class="advice-trade-date">交易日 {{ a.tradeDate }}</span>
                 <span v-if="a.confidence !== null" class="advice-conf">置信度 {{ a.confidence }}%</span>
+                <span v-if="a.suggestedPct !== null" class="advice-position">
+                  建议仓位 {{ a.suggestedPct }}%
+                  <template v-if="detail.currentWeightPct !== null">（当前 {{ detail.currentWeightPct }}%）</template>
+                </span>
               </div>
               <div class="advice-reason">{{ a.reason ?? '（无理由）' }}</div>
               <!-- 事后实际走势：入场日 = 建议后首个交易日 -->
@@ -393,6 +469,10 @@ watch(
                 </tr>
               </tbody>
             </n-table>
+            <n-alert v-if="insufficientHorizons.length > 0" type="info" :bordered="false" class="review-warn">
+              {{ insufficientHorizons.map((s) => s.horizon + ' 日').join('、') }}周期样本不足
+              {{ minSampleForRate }} 条，命中率只给到"命中数/总数"、不折算百分比——样本太少时百分比会随噪声剧烈跳动，还不足以下结论。
+            </n-alert>
             <p class="review-hint">
               入场日取建议交易日之后第一个交易日（收盘后出建议，当日净值尚未公布，避免前视偏差）。
               命中率只统计有方向的加仓/减仓建议；hold 无方向不进命中率，其后续收益单列「持有后均涨」。
@@ -438,8 +518,54 @@ watch(
 .chart-card,
 .hold-card,
 .advice-card,
-.review-card {
+.review-card,
+.metric-card {
   margin-top: 16px;
+}
+
+/* ---------- 量化指标卡 ---------- */
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px 16px;
+}
+
+.metric-label {
+  font-size: 12px;
+  color: var(--text-color-3);
+}
+
+.metric-value {
+  margin-top: 2px;
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-extra {
+  margin-left: 4px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-color-3);
+}
+
+.metric-note {
+  font-size: 12px;
+  color: var(--text-color-3);
+}
+
+.excess-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.excess-detail {
+  font-size: 11px;
+  opacity: 0.85;
 }
 
 .chart {
@@ -485,6 +611,12 @@ watch(
   color: var(--text-color-3);
 }
 
+.advice-position {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary-color, #3b82f6);
+}
+
 .advice-reason {
   font-size: 13px;
   line-height: 1.6;
@@ -521,6 +653,12 @@ watch(
 .review-note {
   font-size: 12px;
   color: var(--text-color-3);
+}
+
+.review-warn {
+  margin-bottom: 10px;
+  font-size: 12px;
+  line-height: 1.7;
 }
 
 .review-hint {

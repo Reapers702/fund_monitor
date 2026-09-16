@@ -230,12 +230,21 @@ export interface AdviceRow {
   action: string
   reason: string | null
   confidence: number | null
+  suggestedPct: number | null // 建议该基金占组合比例 %（模型未给出为 null）
   createdAt: string
 }
 
 export async function adviceList(pool: Pool, code: string, userId: number, limit = 20): Promise<AdviceRow[]> {
-  const r = await pool.query<{ id: number; trade_date: Date; action: string; reason: string | null; confidence: string | null; created_at: Date }>(
-    `SELECT id, trade_date, action, reason, confidence, created_at FROM ds_advice
+  const r = await pool.query<{
+    id: number
+    trade_date: Date
+    action: string
+    reason: string | null
+    confidence: string | null
+    suggested_pct: string | null
+    created_at: Date
+  }>(
+    `SELECT id, trade_date, action, reason, confidence, suggested_pct, created_at FROM ds_advice
      WHERE fund_code = $1 AND user_id = $2 ORDER BY trade_date DESC, id DESC LIMIT $3`,
     [code, userId, limit]
   )
@@ -245,6 +254,7 @@ export async function adviceList(pool: Pool, code: string, userId: number, limit
     action: x.action,
     reason: x.reason,
     confidence: x.confidence === null ? null : Number(x.confidence),
+    suggestedPct: x.suggested_pct === null ? null : Number(x.suggested_pct),
     createdAt: x.created_at.toISOString()
   }))
 }

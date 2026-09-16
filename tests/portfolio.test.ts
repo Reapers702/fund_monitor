@@ -1,6 +1,6 @@
 // 组合视角单测（portfolio/portfolio）：权重口径、个股暴露聚合、集中度、重叠度、相关性
 import { describe, it, expect } from 'vitest'
-import { analyzePortfolio, resolveFundWeights, pearson, MIN_CORR_DAYS } from '../src/main/portfolio/portfolio'
+import { analyzePortfolio, resolveFundWeights, pearson, formatPortfolioContext, currentWeightPct, MIN_CORR_DAYS } from '../src/main/portfolio/portfolio'
 import type { PortfolioFundInput } from '../src/main/portfolio/portfolio'
 
 function navSeq(n: number, fn: (i: number) => number): { date: string; nav: number }[] {
@@ -151,5 +151,80 @@ describe('analyzePortfolio（组合视角）', () => {
     expect(p.stockCount).toBe(1)
     expect(p.topStocks[0].stockCode).toBe('600036')
     expect(p.totalExposure).toBeCloseTo(4, 2) // 单基金等权 100% × 4%
+  })
+})
+
+describe('currentWeightPct（当前占组合比例，用于对比建议仓位）', () => {
+  it('按持仓市值占总市值的比例计算', () => {
+    const ps = [
+      { fundCode: 'a', marketValue: 6000 },
+      { fundCode: 'b', marketValue: 4000 }
+    ]
+    expect(currentWeightPct(ps, 'a')).toBeCloseTo(60, 6)
+    expect(currentWeightPct(ps, 'b')).toBeCloseTo(40, 6)
+  })
+
+  it('无持仓 / 总市值为 0 / 该基金不在持仓中 → null（没有"当前占比"可比）', () => {
+    expect(currentWeightPct([], 'a')).toBeNull()
+    expect(currentWeightPct([{ fundCode: 'a', marketValue: null }], 'a')).toBeNull()
+    expect(currentWeightPct([{ fundCode: 'a', marketValue: 0 }], 'a')).toBeNull()
+    expect(currentWeightPct([{ fundCode: 'b', marketValue: 100 }], 'a')).toBeNull()
+  })
+})
+
+describe('formatPortfolioContext（喂给 AI 的单基金组合上下文）', () => {
+  it('描述组合权重、重叠基金与共同重仓股', () => {
+    const p = analyzePortfolio(twoFunds(4000))
+    const text = formatPortfolioContext(p, '000001')!
+    expect(text).toContain('组合上下文')
+    expect(text).toContain('该基金占组合 60%')
+    expect(text).toContain('按持仓市值')
+    expect(text).toContain('基金B')
+    expect(text).toContain('重仓重叠度 57.1%')
+    expect(text).toContain('贵州茅台')
+  })
+
+  it('站在另一只基金视角时方向对称（基金对名称取对方）', () => {
+    const p = analyzePortfolio(twoFunds(4000))
+    const text = formatPortfolioContext(p, '000002')!
+    expect(text).toContain('该基金占组合 40%')
+    expect(text).toContain('基金A')
+  })
+
+  it('只有一只基金 / 无重叠无相关性时返回 null（不拼空块）', () => {
+    const single = twoFunds(4000).slice(0, 1)
+    expect(formatPortfolioContext(analyzePortfolio(single), '000001')).toBeNull()
+
+    // 两只基金完全不同的重仓股，且净值序列无共同交易日（无法算相关性）
+    const nav = navSeq(25, (i) => 1 + i * 0.01)
+    const disjoint = [
+      { code: 'a', name: 'A', marketValue: 1000, holdings: [{ stockCode: '600519', stockName: '贵州茅台', weight: 10 }], nav },
+      { code: 'b', name: 'B', marketValue: 1000, holdings: [{ stockCode: '000858', stockName: '五粮液', weight: 10 }], nav: [] }
+    ]
+    expect(formatPortfolioContext(analyzePortfolio(disjoint), 'a')).toBeNull()
+  })
+
+  it('组合层面暴露偏高的个股会被点出', () => {
+    const nav = navSeq(25, (i) => 1 + i * 0.01)
+    const funds: PortfolioFundInput[] = [
+      {
+        code: 'a',
+        name: 'A',
+        marketValue: 1000,
+        holdings: [{ stockCode: '600519', stockName: '贵州茅台', weight: 30 }],
+        nav
+      },
+      {
+        code: 'b',
+        name: 'B',
+        marketValue: 1000,
+        holdings: [{ stockCode: '600519', stockName: '贵州茅台', weight: 30 }],
+        nav
+      }
+    ]
+    const text = formatPortfolioContext(analyzePortfolio(funds), 'a')!
+    expect(text).toContain('合计暴露已偏高')
+    expect(text).toContain('贵州茅台')
+    expect(text).toContain('组合 30%')
   })
 })

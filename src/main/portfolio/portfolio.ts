@@ -81,8 +81,19 @@ function stockKey(h: PortfolioHolding): string | null {
   return null
 }
 
-/** 分配各基金的组合权重（%）：全部有持仓市值则按市值，否则等权 */
-export function resolveFundWeights(funds: { code: string; marketValue: number | null }[]): {
+/**
+ * 该基金占组合的当前权重 %（按持仓市值）。用于和 AI 给出的「建议仓位」对比。
+ * 无持仓、或组合总市值为 0 时返回 null（此时没有"当前占比"可谈）。
+ */
+export function currentWeightPct(positions: { fundCode: string; marketValue: number | null }[], code: string): number | null {
+  const total = positions.reduce((s, p) => s + (p.marketValue ?? 0), 0)
+  if (total <= 0) return null
+  const v = positions.find((p) => p.fundCode === code)?.marketValue ?? 0
+  if (v <= 0) return null
+  return round((v / total) * 100)
+}
+
+/** 分配各基金的组合权重（%）：全部有持仓市值则按市值，否则等权 */export function resolveFundWeights(funds: { code: string; marketValue: number | null }[]): {
   basis: WeightBasis
   weights: number[] // 与 funds 对齐，单位 %
 } {
@@ -277,4 +288,54 @@ export function analyzePortfolio(funds: PortfolioFundInput[], topN = 10): Portfo
     overlaps,
     correlations
   }
+}
+
+// ---------- 单只基金视角的组合上下文（喂给 AI 的提示块） ----------
+
+/**
+ * 把"这只基金在组合里的位置"整理成一段文字，供 AI 分析时参考：
+ * 组合权重、与哪些基金重仓重叠 / 相关性高、它的重仓股是否构成组合级集中度。
+ * 组合只有这一只基金、或既无重叠也无相关性时返回 null（不拼空块）。
+ */
+export function formatPortfolioContext(analysis: PortfolioAnalysis, code: string): string | null {
+  if (analysis.fundCount < 2) return null
+  const me = analysis.funds.find((f) => f.code === code)
+  if (!me) return null
+
+  const other = (p: { fundA: { code: string; name: string }; fundB: { code: string; name: string } }): { code: string; name: string } =>
+    p.fundA.code === code ? p.fundB : p.fundA
+
+  const overlaps = analysis.overlaps.filter((o) => o.fundA.code === code || o.fundB.code === code)
+  const corrs = analysis.correlations.filter((c) => c.fundA.code === code || c.fundB.code === code)
+  if (overlaps.length === 0 && corrs.length === 0) return null
+
+  const lines: string[] = []
+  lines.push(
+    `组合上下文（该基金占组合 ${me.weight}%，权重口径：${
+      analysis.weightBasis === 'position' ? '按持仓市值' : '等权（有基金未录入持仓）'
+    }；组合共 ${analysis.fundCount} 只基金，已知前十大个股暴露合计 ${analysis.totalExposure}%）：`
+  )
+
+  for (const o of overlaps.slice(0, 2)) {
+    const names = o.commonStocks
+      .slice(0, 4)
+      .map((s) => s.stockName ?? s.stockCode ?? '?')
+      .join('、')
+    lines.push(`- 与「${other(o).name}」重仓重叠度 ${o.overlapPct}%（共同重仓 ${o.commonCount} 只：${names}）`)
+  }
+
+  for (const c of corrs.slice(0, 2)) {
+    lines.push(`- 与「${other(c).name}」日收益相关性 ${c.corr}（共同交易日 ${c.commonDays}）`)
+  }
+
+  const myHigh = analysis.topStocks.filter((s) => s.high && s.funds.some((f) => f.code === code))
+  if (myHigh.length > 0) {
+    lines.push(
+      `- 该基金重仓股中，组合层面合计暴露已偏高：${myHigh
+        .map((s) => `${s.stockName ?? s.key}（组合 ${s.exposure}%）`)
+        .join('、')}`
+    )
+  }
+
+  return lines.join('\n')
 }

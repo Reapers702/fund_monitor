@@ -28,8 +28,26 @@ interface AppConfig {
   deepseek: { apiKey: string; baseUrl: string; model: string }
   fetcher: { navCheckMinutes: number; holdingsRefreshDays: number; estimateIntervalSeconds: number }
   analyzer: { minutes: string }
+  // 桌面提醒阈值（0 = 关闭该项；语义见 src/main/alerts/rules.ts）
+  alerts: {
+    enabled: boolean
+    navMovePct: number
+    estimateMovePct: number
+    estimateOffPct: number
+    badNews: boolean
+    takeProfitPct: number
+    stopLossPct: number
+  }
   fetch: { channel: 'node' | 'browser' | 'auto' }
   funds: string[]
+}
+
+// 提醒检查结果（alerts:run 返回）
+interface AlertRunResult {
+  evaluated: number // 参与评估的（用户, 基金）对数
+  triggered: number // 命中规则的条数（去重前）
+  notified: number // 实际推送条数（去重后）
+  items: { userId: number; fundCode: string; type: string; title: string }[]
 }
 
 // ---------- 基金 ----------
@@ -97,7 +115,38 @@ interface AdviceRow {
   action: string
   reason: string | null
   confidence: number | null
+  suggestedPct: number | null // 建议该基金占组合比例 %（模型未给出为 null）
   createdAt: string
+}
+
+// ---------- 量化指标（analyzer/metrics 计算，随 fund:detail 返回） ----------
+
+interface FundMetrics {
+  sampleDays: number
+  periodReturn: number | null // 区间累计涨跌 %
+  annualizedReturn: number | null // 年化收益 %
+  annualizedVol: number | null // 年化波动率 %
+  sharpe: number | null // 夏普比率（无风险利率 2%）
+  maxDrawdown: number | null // 最大回撤 %（负值）
+  currentDrawdown: number | null // 当前距区间最高点回撤 %
+  winRate: number | null // 日度上涨占比 %
+  ret20: number | null
+  ret60: number | null
+  ma20: number | null
+  aboveMa20: boolean | null
+}
+
+interface ExcessWindow {
+  window: number
+  fundRet: number | null
+  benchRet: number | null
+  excess: number | null
+}
+
+interface RelativeStrength {
+  benchmark: string
+  commonDays: number
+  windows: ExcessWindow[]
 }
 
 interface FundDetail {
@@ -107,6 +156,9 @@ interface FundDetail {
   holdings: { reportDate: string | null; rows: HoldingWithStock[] }
   advice: AdviceRow[]
   adviceReview: AdviceReview
+  metrics: FundMetrics
+  relativeStrength: RelativeStrength | null // 基准日K取不到时为 null（只展示基金自身指标）
+  currentWeightPct: number | null // 该基金当前占组合比例 %（无持仓为 null，用于对比建议仓位）
 }
 
 // ---------- AI 建议复盘（analyzer/review 计算，随 fund:detail 返回） ----------
@@ -144,6 +196,7 @@ interface AdviceReviewStat {
 
 interface AdviceReview {
   horizons: number[]
+  minSampleForRate: number // 命中率最小样本数（低于此值不给百分比结论）
   items: AdviceReviewItem[]
   stats: AdviceReviewStat[]
 }
@@ -157,6 +210,7 @@ interface AdviceRunResult {
     action: 'add' | 'reduce' | 'hold'
     confidence: number
     reason: string
+    suggestedPct: number | null
     tradeDate: string
     inserted: boolean
   } | null
@@ -367,4 +421,5 @@ interface FundApi {
   configGet: () => Promise<AppConfig>
   configSave: (patch: Record<string, unknown>) => Promise<AppConfig>
   schedulerStatus: () => Promise<SchedulerStatus>
+  alertsRun: () => Promise<AlertRunResult>
 }
