@@ -11,6 +11,7 @@ import { runAnalyzeAllCore } from './analyze'
 import { syncFund } from './fund'
 import { latestNavDate } from './storage/fundRepo'
 import { cleanupOldEstimates, recordEstimateDiffs } from './storage/estimateRepo'
+import { runAlertCheck, cleanupAlertLog } from './alerts/run'
 import { todayStr } from './quotes'
 import { isIntraday, isAfterClose, nowMinutes } from './scheduler/time'
 import { isTradingDay as isTradingDayCal, latestTradingDayStr } from './scheduler/tradingCalendar'
@@ -91,6 +92,18 @@ async function tick(): Promise<void> {
           logInfo(`[scheduler] ${state.lastLog}`)
         }
         if (r.errors > 0) logWarn(`[scheduler] 估值采样失败 ${r.errors} 条`)
+        // 采样后立刻检查估值类提醒（阈值/盘中止盈止损）：估算大幅异动时当天只推一次
+        if (cfg.alerts.enabled) {
+          const aiFundPool = createAiFundPool(cfg)
+          try {
+            const a = await runAlertCheck(pool, aiFundPool, cfg, 'intraday')
+            if (a.notified > 0) state.lastLog += `，盘中提醒 ${a.notified} 条`
+          } catch (e) {
+            logWarn(`[scheduler] 盘中提醒检查失败: ${(e as Error).message}`)
+          } finally {
+            await aiFundPool.end().catch(() => {})
+          }
+        }
       }
     }
 
@@ -113,11 +126,32 @@ async function tick(): Promise<void> {
             } catch (e) {
               logWarn(`[scheduler] 估值误差记录失败: ${(e as Error).message}`)
             }
+            // 净值确认后检查收盘类提醒：净值异动 / 估值失真 / 止盈止损 / 重仓股负面新闻
+            if (cfg.alerts.enabled) {
+              const aiFundPool = createAiFundPool(cfg)
+              try {
+                const a = await runAlertCheck(pool, aiFundPool, cfg, 'close')
+                if (a.notified > 0) {
+                  state.lastLog += `，提醒 ${a.notified} 条`
+                  logInfo(`[scheduler] 收盘提醒推送 ${a.notified} 条`)
+                }
+              } catch (e) {
+                logWarn(`[scheduler] 收盘提醒检查失败: ${(e as Error).message}`)
+              } finally {
+                await aiFundPool.end().catch(() => {})
+              }
+            }
             try {
               const removed = await cleanupOldEstimates(pool, 30)
               if (removed > 0) logInfo(`[scheduler] 清理过期估值采样 ${removed} 条`)
             } catch (e) {
               logWarn(`[scheduler] 估值清理失败: ${(e as Error).message}`)
+            }
+            try {
+              const removed = await cleanupAlertLog(pool, 90)
+              if (removed > 0) logInfo(`[scheduler] 清理过期提醒记录 ${removed} 条`)
+            } catch (e) {
+              logWarn(`[scheduler] 提醒记录清理失败: ${(e as Error).message}`)
             }
           }
         } else {

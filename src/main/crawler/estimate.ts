@@ -53,6 +53,13 @@ const ETF_RULES: { re: RegExp; secid: string; name: string }[] = [
 
 export type EstimateSource = 'tracking_index' | 'theme_etf' | 'holdings_weighted'
 
+/** 估值来源 → 中文名（界面/通知/AI 提示词共用，避免多处各写一份） */
+export const ESTIMATE_SOURCE_NAMES: Record<string, string> = {
+  tracking_index: '跟踪指数',
+  theme_etf: '主题ETF',
+  holdings_weighted: '重仓股加权'
+}
+
 export interface TrackingMatch {
   secid: string
   name: string

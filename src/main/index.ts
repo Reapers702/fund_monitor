@@ -7,6 +7,7 @@ import { runCheck } from './check'
 import { runFund } from './fund'
 import { runQuotes } from './quotes'
 import { runNews } from './news'
+import { runAlerts } from './alerts'
 import { runAnalyzeAll, runAnalyzeOne } from './analyze'
 import { startScheduler, stopScheduler } from './scheduler'
 import { initLogger, logInfo, logWarn } from './logger'
@@ -103,6 +104,10 @@ if (process.argv.includes('--check')) {
 } else if (process.argv.includes('--news')) {
   app.whenReady().then(async () => {
     app.exit(await runNews())
+  })
+} else if (process.argv.includes('--alerts')) {
+  app.whenReady().then(async () => {
+    app.exit(await runAlerts())
   })
 } else if (process.argv.includes('--analyze-all')) {
   app.whenReady().then(async () => {
@@ -216,6 +221,13 @@ if (process.argv.includes('--check')) {
               `window.api.adviceAnalyzeAll().then(r => JSON.stringify({ok: r.ok, done: r.result?.done, total: r.result?.total, notified: r.result?.notified}))`
             )
             console.log('[ipc-test-ai] advice:analyzeAll →', r)
+          }
+          // --ipc-test-alerts 时验证 alerts:run（设置页"立即检查提醒"）
+          if (process.argv.includes('--ipc-test-alerts')) {
+            const r = await win.webContents.executeJavaScript(
+              `window.api.alertsRun().then(r => JSON.stringify({evaluated: r?.evaluated, triggered: r?.triggered, notified: r?.notified, items: r?.items?.map(i => i.type)}))`
+            )
+            console.log('[ipc-test-alerts] alerts:run →', r)
           }
           // 详情页诊断：--fund-detail-diag 打印 fundDetail 返回的净值序列尾部（验证渲染进程拿到的最新净值）
           if (process.argv.includes('--fund-detail-diag')) {

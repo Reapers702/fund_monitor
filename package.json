@@ -24,6 +24,7 @@
     "build:linux": "npm run build && electron-builder --linux",
     "quotes": "npm run build && electron . --quotes",
     "news": "npm run build && electron . --news",
+    "alerts": "npm run build && electron . --alerts",
     "analyze": "npm run build && electron . --analyze",
     "analyze-all": "npm run build && electron . --analyze-all",
     "test": "vitest run"

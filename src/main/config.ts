@@ -24,6 +24,16 @@ export interface AppConfig {
     estimateIntervalSeconds: number
   }
   analyzer: { minutes: string }
+  // 桌面提醒阈值（0 = 关闭该项；详见 src/main/alerts/rules.ts 的语义说明）
+  alerts: {
+    enabled: boolean
+    navMovePct: number // 净值单日涨跌绝对值阈值
+    estimateMovePct: number // 盘中估值涨跌绝对值阈值
+    estimateOffPct: number // 估值与实际净值偏离阈值（估值失真预警）
+    badNews: boolean // 重仓股负面新闻提醒
+    takeProfitPct: number // 持仓收益率 ≥ 该值 → 止盈
+    stopLossPct: number // 持仓收益率 ≤ −该值 → 止损
+  }
   fetch: { channel: 'node' | 'browser' | 'auto' }
   funds: string[]
   // 当前激活用户（多用户 M9）：应用启动后从本字段恢复；见 src/main/user.ts
@@ -40,6 +50,15 @@ const DEFAULTS: AppConfig = {
     estimateIntervalSeconds: 300
   },
   analyzer: { minutes: '35' },
+  alerts: {
+    enabled: true,
+    navMovePct: 3,
+    estimateMovePct: 3,
+    estimateOffPct: 2,
+    badNews: true,
+    takeProfitPct: 20,
+    stopLossPct: 10
+  },
   fetch: { channel: 'node' },
   funds: [],
   currentUserId: 1

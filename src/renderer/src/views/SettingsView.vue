@@ -54,6 +54,13 @@ const form = ref({
   holdingsRefreshDays: 7,
   estimateIntervalSeconds: 300,
   analyzerMinutes: '35',
+  alertsEnabled: true,
+  navMovePct: 3,
+  estimateMovePct: 3,
+  estimateOffPct: 2,
+  badNews: true,
+  takeProfitPct: 20,
+  stopLossPct: 10,
   fetchChannel: 'node' as 'node' | 'browser' | 'auto',
   autoLaunch: false
 })
@@ -74,6 +81,13 @@ async function load(): Promise<void> {
       holdingsRefreshDays: cfg.fetcher.holdingsRefreshDays,
       estimateIntervalSeconds: cfg.fetcher.estimateIntervalSeconds,
       analyzerMinutes: cfg.analyzer.minutes,
+      alertsEnabled: cfg.alerts.enabled,
+      navMovePct: cfg.alerts.navMovePct,
+      estimateMovePct: cfg.alerts.estimateMovePct,
+      estimateOffPct: cfg.alerts.estimateOffPct,
+      badNews: cfg.alerts.badNews,
+      takeProfitPct: cfg.alerts.takeProfitPct,
+      stopLossPct: cfg.alerts.stopLossPct,
       fetchChannel: cfg.fetch.channel,
       autoLaunch: false
     }
@@ -115,6 +129,15 @@ async function save(): Promise<void> {
         estimateIntervalSeconds: form.value.estimateIntervalSeconds
       },
       analyzer: { minutes: form.value.analyzerMinutes },
+      alerts: {
+        enabled: form.value.alertsEnabled,
+        navMovePct: form.value.navMovePct,
+        estimateMovePct: form.value.estimateMovePct,
+        estimateOffPct: form.value.estimateOffPct,
+        badNews: form.value.badNews,
+        takeProfitPct: form.value.takeProfitPct,
+        stopLossPct: form.value.stopLossPct
+      },
       fetch: { channel: form.value.fetchChannel }
     })
     message.success('配置已保存')
@@ -126,6 +149,26 @@ async function save(): Promise<void> {
 }
 
 onMounted(load)
+
+// ---------- 提醒：手动检查 ----------
+
+const checkingAlerts = ref(false)
+
+async function runAlerts(): Promise<void> {
+  checkingAlerts.value = true
+  try {
+    const r = await window.api.alertsRun()
+    if (r.notified > 0) {
+      message.success(`已推送 ${r.notified} 条提醒（评估 ${r.evaluated} 只，命中 ${r.triggered} 条）`)
+    } else {
+      message.info(`无新提醒（评估 ${r.evaluated} 只，命中 ${r.triggered} 条；同类提醒当天只推一次）`)
+    }
+  } catch (e) {
+    message.error(`检查提醒失败: ${(e as Error).message}`)
+  } finally {
+    checkingAlerts.value = false
+  }
+}
 </script>
 
 <template>
@@ -226,6 +269,48 @@ onMounted(load)
             </n-space>
           </n-form-item>
         </n-form>
+      </n-card>
+
+      <n-card title="桌面提醒" class="card">
+        <n-form label-placement="left" label-width="200" size="small">
+          <n-form-item label="总开关">
+            <n-space align="center" :size="10">
+              <n-switch v-model:value="form.alertsEnabled" />
+              <span class="opt-hint">关闭后不再推送任何阈值提醒（AI 建议通知不受影响）</span>
+            </n-space>
+          </n-form-item>
+          <n-form-item label="净值异动阈值（%）">
+            <n-input-number v-model:value="form.navMovePct" :min="0" :max="20" :precision="1" />
+          </n-form-item>
+          <n-form-item label="盘中估值异动阈值（%）">
+            <n-input-number v-model:value="form.estimateMovePct" :min="0" :max="20" :precision="1" />
+          </n-form-item>
+          <n-form-item label="估值失真阈值（百分点）">
+            <n-input-number v-model:value="form.estimateOffPct" :min="0" :max="20" :precision="1" />
+          </n-form-item>
+          <n-form-item label="止盈阈值（收益率 %）">
+            <n-input-number v-model:value="form.takeProfitPct" :min="0" :max="500" :precision="1" />
+          </n-form-item>
+          <n-form-item label="止损阈值（收益率 %）">
+            <n-input-number v-model:value="form.stopLossPct" :min="0" :max="100" :precision="1" />
+          </n-form-item>
+          <n-form-item label="重仓股负面新闻">
+            <n-space align="center" :size="10">
+              <n-switch v-model:value="form.badNews" />
+              <span class="opt-hint">重仓股出现负面情绪新闻时提醒</span>
+            </n-space>
+          </n-form-item>
+          <n-form-item label="手动检查">
+            <n-space align="center" :size="10">
+              <n-button size="small" :loading="checkingAlerts" @click="runAlerts">立即检查提醒</n-button>
+              <span class="opt-hint">盘中 + 盘后两轮都跑（与自动调度一致）：估值异动 / 净值异动 / 估值失真 / 止盈止损 / 重仓股负面新闻</span>
+            </n-space>
+          </n-form-item>
+        </n-form>
+        <n-alert type="info" :bordered="false" class="tip">
+          阈值填 0 表示关闭该项。盘中只检查估值异动（净值/持仓在盘中仍是昨日数据，提前判断会误报）；净值异动、估值失真、止盈止损、负面新闻在盘后净值确认时检查。
+          同一只基金的同类提醒每天只推一次，避免盘中采样重复轰炸。止损阈值填 10 表示收益率 ≤ −10% 时提醒。
+        </n-alert>
       </n-card>
 
       <n-divider />
