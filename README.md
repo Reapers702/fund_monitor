@@ -23,9 +23,11 @@
 - **我的持仓**：买卖录入/删除，移动加权平均成本与盈亏汇总，费率设置
 - **新闻流**：只读 `ai_fund.raw_news` 时间线，情绪色标 + LLM 主题标签 + 关键词筛选（60s 自动轮询）
 - **AI 分析**：DeepSeek 生成建议（写 `ds_advice`），非 hold 触发桌面通知
-- **AI 建议复盘**：把历史建议与后续净值对齐，算后 5/10/20 个交易日的实际涨跌与方向命中率（加仓后涨、减仓后跌才算命中，hold 无方向不计入命中率）；详情页同时给出加仓/减仓后平均收益与高置信度（≥70）分档命中率——用于检验建议到底准不准，而不只是"生成过建议"
+- **AI 建议复盘**：把历史建议与后续净值对齐，算后 5/10/20 个交易日的实际涨跌与方向命中率（加仓后涨、减仓后跌才算命中，hold 无方向不计入命中率）；详情页同时给出加仓/减仓后平均收益与高置信度（≥70）分档命中率——用于检验建议到底准不准，而不只是"生成过建议"。样本不足 10 条只给"命中数/总数"不折算百分比（少数样本的百分比会随噪声剧烈跳动，容易让人对噪声下判断）
 - **量化指标**：分析前先把净值算成区间/年化收益、年化波动率、夏普、最大回撤、日涨占比、20 日均线、相对沪深300超额等指标再喂给 DeepSeek（模型只解读，不自行重算）
-- **组合视角**（持仓页）：跨基金合并重仓股暴露、提示隐性集中度（同一只股票被多只基金共同重仓）、重仓股两两重叠度、基金日收益相关性，识别"买了好几只其实是同一批股票"
+- **组合视角**（持仓页）：跨基金合并重仓股暴露、提示隐性集中度（同一只股票被多只基金共同重仓）、重仓股两两重叠度、基金日收益相关性，识别"买了好几只其实是同一批股票"；同一份组合上下文也会进 AI 分析 prompt，让建议考虑组合层面的集中风险
+- **建议仓位**：AI 建议附"该基金占组合的建议比例"（`ds_advice.suggested_pct`），详情页显示建议仓位与当前占比
+- **桌面提醒**：净值异动 / 盘中估值异动 / 估值失真 / 止盈止损 / 重仓股负面新闻五类，阈值可在设置页配置（填 0 关闭该项），设置页可手动立即检查。盘中只检查估值类（净值/持仓在盘中仍是昨日数据，提前判断会误报），其余在盘后净值确认时检查；同一只基金同类提醒每天只推一次（`alert_log` 去重），避免盘中每 5 分钟采样重复轰炸
 - **多用户**：无密码按名字切换（顶栏显示当前用户，设置页管理/新建）；自选基金、持仓、费率、AI 建议（基于各自持仓）按用户隔离，基金基本信息/净值/估值/重仓股全局共享——多人收藏同一基金不重复抓取
 - **托盘常驻**：关闭窗口最小化到系统托盘，后台采集/AI 分析持续运行；托盘菜单可显示主窗口或退出；设置页可开关开机自启
 - **设置**：DeepSeek Key / 抓取频率 / 通道 / 开机自启写回 config.json
@@ -34,13 +36,14 @@
 ## 架构说明
 
 - **新闻不抓取**：财联社采集 + LLM 增强由另一套 24h 运行的程序完成，写入同一 PG 实例的 `ai_fund` 库 `raw_news` 表（含 `summary`/`sentiment`/`llm_tags` 字段），本应用仅通过 `config.aiFund` 只读连接消费。
-- **双库并存**：本应用数据在 `fund_monitor` 库（11 张表，启动自动建表幂等）；新闻在 `ai_fund` 库。两者通常同实例同凭证、仅库名不同。
+- **双库并存**：本应用数据在 `fund_monitor` 库（12 张表，启动自动建表幂等）；新闻在 `ai_fund` 库。两者通常同实例同凭证、仅库名不同。
 - **多用户数据面**：`app_user`（用户）+ `user_fund`（用户自选基金，含启用/停用）+ 用户级列（`fund_trade.user_id` / `ds_advice.user_id` / `fund_profile` 按 user_id）；基金数据（`fund_basic`/净值/估值/重仓股/行情）无用户维度全局共享。历史数据已迁移至默认用户 **guanxin**。当前用户持久化在 config.json `currentUserId`。
 - **盘中估值三级降级**：T1 按基金名称关键词匹配跟踪指数（INDEX_RULES 17 条）→ 指数实时涨跌幅；T2 行业/主题型基金匹配同主题 ETF（ETF_RULES 20 条，fundgz 页面估值接口已下线，用主题 ETF 替代）；T3 主动型基金（无规则命中）用最近季报重仓股实时涨跌按权重加权估算（误差大仅参考，界面标注"基于季报估算"）。全部写 `fund_estimate`（source 区分），详见"估值说明"页。
 - **行情多源降级**：个股/指数行情主 push2/push2his（东财），连接被拒或持续失败自动熔断 5 分钟后走腾讯 `qt.gtimg` / `web.ifzq` 降级源（`crawler/market.ts`）。
-- **后台调度器**：主窗口启动后常驻（`scheduler.ts`），按交易时段自动执行——盘中（9:30-11:30 / 13:00-15:00，仅交易日）每 `estimateIntervalSeconds` 做一轮估值采样；盘后（15:30 起，交易日与非交易日都跑）按 `navCheckMinutes` 轮询净值直至出现或 23:00（非交易日目标为最近交易日，覆盖"周五净值周六凌晨公布"场景）；收盘后（`analyzer.minutes`，默认 15:35，仅交易日）自动跑全部基金 AI 分析并推送非 hold 通知。任务均带防重跑标记；估值采样/AI 分析跳过非交易日（交易日历三级降级，见 `scheduler/tradingCalendar.ts`）。
+- **后台调度器**：主窗口启动后常驻（`scheduler.ts`），按交易时段自动执行——盘中（9:30-11:30 / 13:00-15:00，仅交易日）每 `estimateIntervalSeconds` 做一轮估值采样；盘后（15:30 起，交易日与非交易日都跑）按 `navCheckMinutes` 轮询净值直至出现或 23:00（非交易日目标为最近交易日，覆盖"周五净值周六凌晨公布"场景）；收盘后（`analyzer.minutes`，默认 15:35，仅交易日）自动跑全部基金 AI 分析并推送非 hold 通知。提醒检查分两处：盘中每轮估值采样后查估值类提醒，净值确认后查净值异动/估值失真/止盈止损/重仓股负面（`cfg.alerts.enabled` 控制，`alerts/run.ts`）。任务均带防重跑标记；估值采样/AI 分析跳过非交易日（交易日历三级降级，见 `scheduler/tradingCalendar.ts`）。
 - **建议复盘口径**：入场日取建议交易日**之后**第一个交易日。收盘后 15:35 出建议时当日净值尚未公布，用下一交易日作为可执行价可避免前视偏差；后 h 日涨跌 = 入场日后第 h 个交易日净值 / 入场日净值 − 1。未满 h 个交易日记为空、不进统计（不把"还没走完"当"没命中"）。
-- **量化/组合指标纯函数化**：指标（`analyzer/metrics.ts`）、复盘（`analyzer/review.ts`）、组合聚合（`portfolio/portfolio.ts`）均为无副作用纯函数，单独单测；相对强弱取沪深300（`1.000300`）日 K，进程内缓存 30 分钟避免 analyze-all 重复请求。
+- **提醒新鲜度门禁**（`alerts/rules.ts`）：提醒文案是"当前/当日"，只能建立在当期数据上——盘中估值必须是**今天**采样的（`est_time` 本地日期=今天），净值异动/估值失真/止盈止损要求净值日期等于当期数据日期（交易日=今天，非交易日=最近交易日，覆盖周五净值周六凌晨公布）。手动触发时库里数据可能是几天前的，不校验就会推"当前估值 −4%"这种误导提醒；更糟的是去重键含交易日，误报会占掉当天名额，真实数据到达后反而不再提醒。
+- **量化/组合指标纯函数化**：指标（`analyzer/metrics.ts`）、复盘（`analyzer/review.ts`）、组合聚合（`portfolio/portfolio.ts`）、提醒规则（`alerts/rules.ts`）均为无副作用纯函数，单独单测；相对强弱取沪深300（`1.000300`）日 K，进程内缓存 30 分钟避免 analyze-all 重复请求。
 
 ## 环境要求
 
@@ -83,6 +86,7 @@ npm run build:win
 | `electron . --fund <code>`（`npm run fund -- <code>`） | 把某只基金的数据同步入库（详情+历史净值全量补种+季度持仓），**不加入自选** | 加自选请用 GUI"我的基金"输入代码；CLI 适合脚本批量补数据 |
 | `electron . --quotes`（`npm run quotes`） | 持仓股行情（日K补种+当日实时价）+ 盘中估值采样（T1/T2/T3）+ 净值增量（补 T+1 公布的净值） | 与 GUI"刷新行情/估值"按钮同一核心（也顺带补净值），日常由后台调度器自动采样，无需手动跑 |
 | `electron . --news`（`npm run news`） | 验证 ai_fund 新闻只读链路 | 基本不用 |
+| `electron . --alerts [--scope intraday\|close]`（`npm run alerts`） | 手动跑一轮提醒检查（不传 `--scope` 时盘中+盘后两轮都跑），同一天同类已推过的不重复推 | 与设置页"立即检查提醒"等价，日常由后台调度器按点自动执行 |
 | `electron . --analyze <code>`（`npm run analyze -- <code>`） | 单只基金 AI 分析（按 guanxin 用户持仓） | 与 GUI 基金详情页"立即分析"等价，日常用 GUI |
 | `electron . --analyze-all`（`npm run analyze-all`） | 所有用户 × 各自自选基金 AI 分析 | 与 GUI"全部 AI 分析"按钮等价，日常由后台调度器 15:35 自动执行 |
 | `electron . --ai-test` | 验证 DeepSeek 链路（配置/连通/一次对话） | 调试用 |
@@ -94,7 +98,7 @@ npm run build:win
 
 ## 数据库
 
-`fund_monitor` 库 11 张表（启动自动 `CREATE TABLE IF NOT EXISTS` 幂等建表 + 单用户→多用户迁移）：
+`fund_monitor` 库 12 张表（启动自动 `CREATE TABLE IF NOT EXISTS` 幂等建表 + 单用户→多用户迁移）：
 
 | 表 | 用途 |
 |---|---|
@@ -106,9 +110,10 @@ npm run build:win
 | `fund_estimate_diff` | 估值误差统计（盘中估值 vs 实际净值） |
 | `fund_holdings` | 季度重仓股（报告期+权重） |
 | `stock_daily` | 个股日线/实时行情 |
-| `ds_advice` | DeepSeek 建议留痕（含 response_raw；按 user_id 隔离） |
+| `ds_advice` | DeepSeek 建议留痕（含 `suggested_pct` 建议仓位、response_raw；按 user_id 隔离） |
 | `fund_trade` | 持仓买卖流水（按 user_id 隔离） |
 | `fund_profile` | 费率配置（按 user_id） |
+| `alert_log` | 已推送提醒留痕（UNIQUE user_id+fund_code+alert_type+trade_date 做当日去重） |
 
 新闻表 `raw_news` 位于 `ai_fund` 库（另一程序维护，本应用只读）。
 
@@ -123,6 +128,11 @@ npm run build:win
   "deepseek": { "apiKey": "", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat" },
   "fetcher": { "navCheckMinutes": 10, "holdingsRefreshDays": 7, "estimateIntervalSeconds": 300 },
   "analyzer": { "minutes": "35" },
+  "alerts": {                          // 桌面提醒（阈值 0 = 关闭该项，设置页可改）
+    "enabled": true,
+    "navMovePct": 3, "estimateMovePct": 3, "estimateOffPct": 2,
+    "badNews": true, "takeProfitPct": 20, "stopLossPct": 10
+  },
   "fetch": { "channel": "node" },  // node / browser / auto
   "funds": []                       // 初始为空，在"我的基金"页添加
 }
@@ -135,15 +145,16 @@ npm run build:win
 ```
 src/
 ├── main/                  # 主进程
-│   ├── index.ts           # 入口 + CLI 分支（--check/--fund/--quotes/--news/--analyze/--analyze-all/--ai-test/--calendar-test/--screenshot）
-│   ├── ipc.ts             # IPC 处理器（funds/position/news/advice/config）
+│   ├── index.ts           # 入口 + CLI 分支（--check/--fund/--quotes/--news/--alerts/--analyze/--analyze-all/--ai-test/--calendar-test/--screenshot）
+│   ├── ipc.ts             # IPC 处理器（funds/position/news/advice/alerts/config）
 │   ├── config.ts          # 配置（config.json + .env 回退）
-│   ├── crawler/           # 抓取（httpClient/pageFetcher/eastmoney/danjuan/market/estimate）
+│   ├── crawler/           # 抓取（httpClient/pageFetcher/eastmoney/danjuan/market/estimate/benchmark）
 │   ├── news/reader.ts     # 只读 ai_fund.raw_news
 │   ├── analyzer/analyze.ts# DeepSeek 建议（取数→prompt→解析→入库）
 │   ├── analyzer/metrics.ts# 量化指标（回撤/波动/夏普/相对沪深300超额，纯函数）
 │   ├── analyzer/review.ts # 建议复盘（后续 N 日涨跌/命中率，纯函数）
 │   ├── portfolio/portfolio.ts # 组合视角（重仓股重叠/集中度/相关性，纯函数）
+│   ├── alerts/            # 提醒（rules.ts 纯规则 / run.ts 取数+去重+通知）
 │   ├── position/          # 移动加权平均持仓计算
 │   ├── storage/           # pg 连接/建表/各表读写 + queries 聚合查询层
 │   └── notifier.ts        # Electron 桌面通知
@@ -156,7 +167,7 @@ src/
 ```bash
 npm run dev          # 开发模式（HMR）
 npm run typecheck    # TS 类型检查（node + web）
-npm test             # vitest 单测（持仓算法 / LLM 解析 / 交易时段 / 交易日历 / 估值规则）
+npm test             # vitest 单测（持仓算法 / LLM 解析与 prompt 组装 / 交易时段 / 交易日历 / 估值规则 / 量化指标 / 建议复盘 / 组合聚合 / 提醒规则）
 npm run build        # 类型检查 + 构建
 npm run build:win    # NSIS 安装包
 ```
@@ -171,10 +182,13 @@ npm run build:win    # NSIS 安装包
 - [x] **日志保留策略**：日志按日滚动（`userData/logs/app-YYYY-MM-DD.log`），启动时自动清理 30 天前日志
 - [x] **主动型基金盘中估值（T3）**：161005 等无跟踪标的的主动型基金，用最近季报前十大重仓股实时涨跌按权重加权估算（误差较大仅参考，页面标注"基于季报估算"；`fundgz` 已下线，未走页面估值方案）
 - [x] **估值误差统计**：盘后净值确认时记录当日最后一次盘中估值与实际净值的差值（`fund_estimate_diff`），估值说明页展示最近 20 日各基金 T1/T2/T3 的平均绝对误差，量化 T3 可信度
-- [x] **AI 建议闭环复盘**：历史建议 vs 后续净值（后 5/10/20 个交易日），命中率 / 加仓减仓后平均收益 / 高置信度分档，详情页展示（`analyzer/review.ts`）
+- [x] **AI 建议闭环复盘**：历史建议 vs 后续净值（后 5/10/20 个交易日），命中率 / 加仓减仓后平均收益 / 高置信度分档，详情页展示（`analyzer/review.ts`）；样本不足 10 条只给命中数不折算百分比
 - [x] **量化指标入 prompt**：回撤/波动率/夏普/相对沪深300超额等先算好再喂 LLM，模型不自行重算（`analyzer/metrics.ts`）
-- [x] **组合视角**：跨基金重仓股暴露与隐性集中度、两两重叠度、日收益相关性（`portfolio/portfolio.ts`）
+- [x] **组合视角**：跨基金重仓股暴露与隐性集中度、两两重叠度、日收益相关性（`portfolio/portfolio.ts`）；同一份组合上下文进 AI prompt
+- [x] **建议仓位**：prompt 要求模型给出该基金的建议组合占比（`ds_advice.suggested_pct`），详情页显示建议仓位与当前占比
+- [x] **提醒扩展**：五类提醒（净值异动/盘中估值异动/估值失真/止盈止损/重仓股负面）阈值可配 + `alert_log` 当日去重 + 数据新鲜度门禁（`alerts/`）
 - [ ] **可选数据源**：雪球个股行情（需会话 cookie，隐藏窗口种 cookie 方案）等
+- [ ] **基金发现/筛选**：当前只有"已知基金"的监控（自选列表新增靠手输代码），缺全市场基金池与筛选维度（主题/费率/规模/回撤/经理任期）——"推荐"目前落在"对已知基金给建议"，尚未覆盖"从全市场挑出候选"
 
 > 已完成：**法定节假日交易日历**（腾讯日K交易日 + 百度法定节假日 + 静态休市表三级降级，见 `scheduler/tradingCalendar.ts`）；**估值说明页**（T1/T2/T3 方法说明 + 各基金当前方式，见"估值说明"菜单）；**多用户（M9）**（自选/持仓/建议按用户隔离，基金数据全局共享不重复抓取，历史数据归 guanxin）。
 
