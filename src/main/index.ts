@@ -9,6 +9,7 @@ import { runQuotes } from './quotes'
 import { runNews } from './news'
 import { runAlerts } from './alerts'
 import { runAnalyzeAll, runAnalyzeOne } from './analyze'
+import { runBacktest } from './backtest'
 import { startScheduler, stopScheduler } from './scheduler'
 import { initLogger, logInfo, logWarn } from './logger'
 import { initUser, ensureDefaultUser } from './user'
@@ -123,6 +124,46 @@ if (process.argv.includes('--check')) {
       return
     }
     app.exit(await runAnalyzeOne(code))
+  })
+} else if (process.argv.includes('--backtest')) {
+  // 推荐可信度回溯评估：electron . --backtest [--codes 012322,017193] [--days 5] [--range 30]
+  app.whenReady().then(async () => {
+    let codesOverride: string[] | undefined
+    const cIdx = process.argv.indexOf('--codes')
+    if (cIdx >= 0 && process.argv[cIdx + 1]) codesOverride = process.argv[cIdx + 1].split(',').map((s) => s.trim()).filter(Boolean)
+    const dIdx = process.argv.indexOf('--days')
+    const days = dIdx >= 0 ? Number(process.argv[dIdx + 1]) || 5 : 5
+    const rIdx = process.argv.indexOf('--range')
+    const range = rIdx >= 0 ? Number(process.argv[rIdx + 1]) || 30 : 30
+    app.exit(await runBacktest(codesOverride, days, range))
+  })
+} else if (process.argv.includes('--rules-backtest')) {
+  // 规则打分回测（确定性，无 LLM）：electron . --rules-backtest [--codes ...] [--days N] [--range M]
+  // 对比纯 LLM 回测的 33% 基线，验证"信号本身能否给出方向"
+  app.whenReady().then(async () => {
+    const { runRulesBacktest } = await import('./rulesBacktest')
+    let codesOverride: string[] | undefined
+    const cIdx = process.argv.indexOf('--codes')
+    if (cIdx >= 0 && process.argv[cIdx + 1]) codesOverride = process.argv[cIdx + 1].split(',').map((s) => s.trim()).filter(Boolean)
+    const dIdx = process.argv.indexOf('--days')
+    const days = dIdx >= 0 ? Number(process.argv[dIdx + 1]) || 30 : 30
+    const rIdx = process.argv.indexOf('--range')
+    const range = rIdx >= 0 ? Number(process.argv[rIdx + 1]) || 120 : 120
+    app.exit(await runRulesBacktest(codesOverride, days, range))
+  })
+} else if (process.argv.includes('--rotate-backtest')) {
+  // 相对强弱轮动回测（无前视）：electron . --rotate-backtest [--codes ...] [--days N] [--range M]
+  // 检验"过去跑得快 → 未来继续跑得赢"是否成立（相对强弱排名持续性）
+  app.whenReady().then(async () => {
+    const { runRotateBacktest } = await import('./rotateBacktest')
+    let codesOverride: string[] | undefined
+    const cIdx = process.argv.indexOf('--codes')
+    if (cIdx >= 0 && process.argv[cIdx + 1]) codesOverride = process.argv[cIdx + 1].split(',').map((s) => s.trim()).filter(Boolean)
+    const dIdx = process.argv.indexOf('--days')
+    const days = dIdx >= 0 ? Number(process.argv[dIdx + 1]) || 40 : 40
+    const rIdx = process.argv.indexOf('--range')
+    const range = rIdx >= 0 ? Number(process.argv[rIdx + 1]) || 500 : 500
+    app.exit(await runRotateBacktest(codesOverride, days, range))
   })
 } else if (process.argv.includes('--ai-test')) {
   // 开发辅助：electron . --ai-test ["提示词"] 验证 DeepSeek 连通性

@@ -27,6 +27,9 @@
     "alerts": "npm run build && electron . --alerts",
     "analyze": "npm run build && electron . --analyze",
     "analyze-all": "npm run build && electron . --analyze-all",
+    "backtest": "npm run build && electron . --backtest",
+    "rules-backtest": "npm run build && electron . --rules-backtest",
+    "rotate-backtest": "npm run build && electron . --rotate-backtest",
     "test": "vitest run"
   },
   "dependencies": {
