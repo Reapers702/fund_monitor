@@ -209,7 +209,8 @@ async function decide(ctx: { pool: Pool; aiFundPool: Pool }, code: string, name:
     timeCtx,
     estimate: [] as EstPoint[], // 库中无对应采样日的历史盘中估值（盘后视角）
     metricsBlock,
-    portfolioBlock: null // 回测口径：不加载组合上下文（依赖当前持仓市值）
+    portfolioBlock: null, // 回测口径：不加载组合上下文（依赖当前持仓市值）
+    ruleBlock: null // 回测口径：不注入规则分（回测检验的是 LLM 基线，规则分另有 --rules-backtest）
   })
 
   const raw = await chatComplete(

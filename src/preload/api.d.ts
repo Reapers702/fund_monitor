@@ -27,7 +27,7 @@ interface AppConfig {
   aiFund: PgConfig
   deepseek: { apiKey: string; baseUrl: string; model: string }
   fetcher: { navCheckMinutes: number; holdingsRefreshDays: number; estimateIntervalSeconds: number }
-  analyzer: { minutes: string }
+  analyzer: { minutes: string; rulesInLLM: boolean }
   // 桌面提醒阈值（0 = 关闭该项；语义见 src/main/alerts/rules.ts）
   alerts: {
     enabled: boolean
@@ -160,6 +160,24 @@ interface FundDetail {
   relativeStrength: RelativeStrength | null // 基准日K取不到时为 null（只展示基金自身指标）
   currentWeightPct: number | null // 该基金当前占组合比例 %（无持仓为 null，用于对比建议仓位）
   valuation: FundValuation | null // 板块指数估值分位（长周期参考轴，无匹配/无快照为 null）
+  ruleScore: RuleScore | null // 规则引擎参考分（四轴量化快照；无数据/计算失败为 null）
+}
+
+// ---------- 规则引擎参考分（scorer/engine.ts 确定性打分，展示用，不驱动建议） ----------
+
+interface RuleScore {
+  breakdown: {
+    momentum: number // [-3,3] 动量轴
+    shape: number // [-3,3] 形态轴
+    intraday: number // [-3,3] 盘中轴
+    news: number // [-3,3] 新闻轴
+    totalRaw: number
+    total: number // [-3,3] 反趋势修正后总分
+    action: 'add' | 'reduce' | 'hold'
+    confidence: number // 0~100
+  }
+  asof: string | null // 所用净值截止日
+  newsCount: number // 参与打分的新闻条数
 }
 
 // ---------- 板块估值分位（index_valuation，长周期参考，非短周期方向） ----------

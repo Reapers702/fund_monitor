@@ -1,7 +1,7 @@
 // AI 分析入口：electron . --analyze <code>  /  --analyze-all（计划书 M6）
 // 对基金执行 DeepSeek 分析 → 写 ds_advice；action != hold 触发桌面通知
 // runAnalyzeAllCore 供 CLI / IPC（advice:analyzeAll）/ scheduler 共用
-import { configPath, ensureConfigFile } from './config'
+import { configPath, ensureConfigFile, loadConfig } from './config'
 import { createPool, ensureSchema, createAiFundPool } from './storage/db'
 import { analyzeFund, saveAdvice, todayStr } from './analyzer/analyze'
 import { notifyAdvice } from './notifier'
@@ -32,13 +32,14 @@ async function analyzeOne(
   aiFundPool: Pool,
   userId: number,
   code: string,
-  name: string
+  name: string,
+  rulesInLLM: boolean
 ): Promise<{ done: boolean; notified: boolean; action?: string; confidence?: number; reason?: string }> {
   const maxAttempts = 3
   let lastErr: unknown
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const r = await analyzeFund({ pool, aiFundPool }, code, null, userId)
+      const r = await analyzeFund({ pool, aiFundPool, rulesInLLM }, code, null, userId)
       if (!r) return { done: false, notified: false }
       await saveAdvice(pool, code, r, todayStr(), userId)
       if (r.action !== 'hold') {
@@ -67,6 +68,7 @@ async function analyzeOne(
  *  skipAnalyzedToday：跳过 trade_date=今日 已有建议记录的基金（scheduler 自动触发用，当日只跑一次；
  *  手动触发（GUI/CLI）传默认 false，保证"想再分析就再分析"）。 */
 export async function runAnalyzeAllCore(pool: Pool, aiFundPool: Pool, skipAnalyzedToday = false): Promise<AnalyzeAllResult> {
+  const rulesInLLM = loadConfig().analyzer.rulesInLLM
   const users = await pool.query<{ id: number }>('SELECT id FROM app_user ORDER BY id')
   const funds = await pool.query<{ user_id: number; fund_code: string; fund_name: string }>(
     `SELECT uf.user_id, f.fund_code, f.fund_name
@@ -96,7 +98,7 @@ export async function runAnalyzeAllCore(pool: Pool, aiFundPool: Pool, skipAnalyz
     for (const f of byUser.get(u.id) ?? []) {
       if (analyzedToday.has(`${u.id}|${f.fund_code}`)) continue
       result.total++
-      const out = await analyzeOne(pool, aiFundPool, u.id, f.fund_code, f.fund_name)
+      const out = await analyzeOne(pool, aiFundPool, u.id, f.fund_code, f.fund_name, rulesInLLM)
       if (out.done) result.done++
       if (out.notified) result.notified++
       result.items.push({ code: f.fund_code, name: f.fund_name, ...out })
@@ -107,7 +109,7 @@ export async function runAnalyzeAllCore(pool: Pool, aiFundPool: Pool, skipAnalyz
 
 /** 单只基金核心：供 --analyze <code> 使用（默认归 guanxin 用户），返回结构化结果 */
 export async function runAnalyzeOneCore(pool: Pool, aiFundPool: Pool, code: string, name: string): Promise<AnalyzeItemResult> {
-  const out = await analyzeOne(pool, aiFundPool, 1, code, name)
+  const out = await analyzeOne(pool, aiFundPool, 1, code, name, loadConfig().analyzer.rulesInLLM)
   return { code, name, ...out }
 }
 

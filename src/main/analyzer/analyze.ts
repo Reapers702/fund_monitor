@@ -150,11 +150,13 @@ export interface PromptInput {
   estimate: EstPoint[]
   metricsBlock: string | null
   portfolioBlock: string | null
+  /** 规则引擎参考分块（config.analyzer.rulesInLLM 开启时才有；null 不拼） */
+  ruleBlock: string | null
 }
 
-/** 拼装 User Prompt（导出供单测：验证指标/组合/持仓/新闻/时点各块确实进入提示词） */
+/** 拼装 User Prompt（导出供单测：验证指标/组合/持仓/新闻/时点/规则分各块确实进入提示词） */
 export function buildUserPrompt(input: PromptInput): string {
-  const { fundName, code, nav, holdings, news, position, timeCtx, estimate, metricsBlock, portfolioBlock } = input
+  const { fundName, code, nav, holdings, news, position, timeCtx, estimate, metricsBlock, portfolioBlock, ruleBlock } = input
   const latestNav = nav[nav.length - 1]
   const firstNav = nav[0]
   const periodPct = firstNav && firstNav.nav > 0 ? (((latestNav.nav - firstNav.nav) / firstNav.nav) * 100).toFixed(2) : null
@@ -185,7 +187,7 @@ export function buildUserPrompt(input: PromptInput): string {
 基金：${fundName}（${code}）
 净值样本数：${nav.length} 条；区间涨跌：${periodPct ?? '--'}%（近${nav.length}个交易日，归一化起点）
 最新净值：${latestNav.nav.toFixed(4)}（${latestNav.date}），当日涨跌 ${latestNav.changePct === null ? '--' : latestNav.changePct.toFixed(2)}%
-${estBlock ? estBlock + '\n' : ''}${metricsBlock ? metricsBlock + '\n' : ''}${portfolioBlock ? portfolioBlock + '\n' : ''}${posLines}
+${estBlock ? estBlock + '\n' : ''}${metricsBlock ? metricsBlock + '\n' : ''}${ruleBlock ? ruleBlock + '\n' : ''}${portfolioBlock ? portfolioBlock + '\n' : ''}${posLines}
 
 近 30 日净值：
 ${navLines}
@@ -204,6 +206,8 @@ ${newsLines || '（无相关新闻）'}
 export interface AnalyzeContext {
   pool: Pool
   aiFundPool: Pool
+  /** 规则引擎参考分是否注入 LLM（config.analyzer.rulesInLLM，默认开） */
+  rulesInLLM?: boolean
 }
 
 /**
@@ -315,6 +319,18 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
   // 组合上下文：单基金判断看不到"和已有基金是不是同一批股票"，这里补上
   const portfolioBlock = await loadPortfolioContext(pool, userId, code)
 
+  // 规则引擎参考分：开关开启时计算并注入 prompt（作为交叉验证的一路参考信号，不构成独立依据）
+  let ruleBlock: string | null = null
+  if (ctx.rulesInLLM !== false) {
+    try {
+      const { computeRuleScore, formatRuleBlock } = await import('../scorer/ruleScore')
+      const rs = await computeRuleScore(pool, aiFundPool, code)
+      if (rs) ruleBlock = formatRuleBlock(rs)
+    } catch (e) {
+      console.warn(`[analyze] ${code} 规则引擎参考分计算失败（忽略继续）: ${(e as Error).message}`)
+    }
+  }
+
   const userPrompt = buildUserPrompt({
     fundName: basic.name,
     code,
@@ -325,7 +341,8 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     timeCtx,
     estimate,
     metricsBlock,
-    portfolioBlock
+    portfolioBlock,
+    ruleBlock
   })
   const raw = await chatComplete(
     [
@@ -364,7 +381,7 @@ export async function runAnalyzeForFund(
   const pool = createPool(cfg)
   const aiFundPool = createAiFundPool(cfg)
   try {
-    const r = await analyzeFund({ pool, aiFundPool }, code, cost)
+    const r = await analyzeFund({ pool, aiFundPool, rulesInLLM: cfg.analyzer.rulesInLLM }, code, cost)
     if (!r) return { result: null, inserted: false, tradeDate: todayStr() }
     const tradeDate = todayStr()
     const inserted = await saveAdvice(pool, code, r, tradeDate)

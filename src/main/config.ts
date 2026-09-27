@@ -23,7 +23,7 @@ export interface AppConfig {
     holdingsRefreshDays: number
     estimateIntervalSeconds: number
   }
-  analyzer: { minutes: string }
+  analyzer: { minutes: string; rulesInLLM: boolean }
   // 桌面提醒阈值（0 = 关闭该项；详见 src/main/alerts/rules.ts 的语义说明）
   alerts: {
     enabled: boolean
@@ -49,7 +49,7 @@ const DEFAULTS: AppConfig = {
     holdingsRefreshDays: 7,
     estimateIntervalSeconds: 300
   },
-  analyzer: { minutes: '35' },
+  analyzer: { minutes: '35', rulesInLLM: true },
   alerts: {
     enabled: true,
     navMovePct: 3,

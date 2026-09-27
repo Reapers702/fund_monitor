@@ -23,6 +23,7 @@ import { evaluateAdviceReviews } from './analyzer/review'
 import { computeFundMetrics, computeRelativeStrength } from './analyzer/metrics'
 import { BENCHMARK_NAME, loadBenchmarkNav, clearBenchmarkCache } from './crawler/benchmark'
 import { valuationForFund } from './crawler/indexValuation'
+import { computeRuleScore } from './scorer/ruleScore'
 import { notifyAdvice } from './notifier'
 import { runQuotesCore } from './quotes'
 import { runAnalyzeAllCore } from './analyze'
@@ -175,6 +176,7 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
   ipcMain.handle('fund:detail', async (_e, code: string, days = 120): Promise<FundDetail> => {
     const cfg = loadConfig()
     const pool = createPool(cfg)
+    const aiFundPool = createAiFundPool(cfg)
     try {
       const uid = getCurrentUserId()
       // 净值/建议一次取足（净值 400 日覆盖 1 年+复盘、建议 200 条）：展示用切片，复盘用全量，避免重复查库
@@ -197,10 +199,13 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
         metrics: computeFundMetrics(navAll),
         relativeStrength: benchNav ? computeRelativeStrength(navAll, benchNav, [20, 60], BENCHMARK_NAME) : null,
         currentWeightPct: currentWeightPct(positions, code),
-        valuation: basic ? await valuationForFund(pool, basic.name) : null
+        valuation: basic ? await valuationForFund(pool, basic.name) : null,
+        // 规则引擎参考分（四轴量化快照；详情页展示用，不驱动建议）——计算失败返回 null
+        ruleScore: await computeRuleScore(pool, aiFundPool, code)
       }
     } finally {
       await pool.end().catch(() => {})
+      await aiFundPool.end().catch(() => {})
     }
   })
 
@@ -212,7 +217,7 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     try {
       await ensureSchema(pool)
       const uid = getCurrentUserId()
-      const r = await analyzeFund({ pool, aiFundPool }, code, null, uid)
+      const r = await analyzeFund({ pool, aiFundPool, rulesInLLM: cfg.analyzer.rulesInLLM }, code, null, uid)
       if (!r) return { ok: false, skipped: true, reason: '未配置 Key 或数据不足', advice: null }
       const tradeDate = todayStr()
       const inserted = await saveAdvice(pool, code, r, tradeDate, uid)
