@@ -54,6 +54,7 @@ const form = ref({
   holdingsRefreshDays: 7,
   estimateIntervalSeconds: 300,
   analyzerMinutes: '35',
+  rulesInLLM: true,
   alertsEnabled: true,
   navMovePct: 3,
   estimateMovePct: 3,
@@ -81,6 +82,7 @@ async function load(): Promise<void> {
       holdingsRefreshDays: cfg.fetcher.holdingsRefreshDays,
       estimateIntervalSeconds: cfg.fetcher.estimateIntervalSeconds,
       analyzerMinutes: cfg.analyzer.minutes,
+      rulesInLLM: cfg.analyzer.rulesInLLM,
       alertsEnabled: cfg.alerts.enabled,
       navMovePct: cfg.alerts.navMovePct,
       estimateMovePct: cfg.alerts.estimateMovePct,
@@ -128,7 +130,7 @@ async function save(): Promise<void> {
         holdingsRefreshDays: form.value.holdingsRefreshDays,
         estimateIntervalSeconds: form.value.estimateIntervalSeconds
       },
-      analyzer: { minutes: form.value.analyzerMinutes },
+      analyzer: { minutes: form.value.analyzerMinutes, rulesInLLM: form.value.rulesInLLM },
       alerts: {
         enabled: form.value.alertsEnabled,
         navMovePct: form.value.navMovePct,
@@ -252,6 +254,10 @@ async function runAlerts(): Promise<void> {
           <n-form-item label="AI 分析时间（分钟）">
             <n-input v-model:value="form.analyzerMinutes" placeholder="如 35（每日 15:35）" />
           </n-form-item>
+          <n-form-item label="规则分注入 AI 分析">
+            <n-switch v-model:value="form.rulesInLLM" />
+            <span class="setting-hint">开启后每次 AI 分析会把规则引擎的四轴参考分注入提示词，作为交叉验证信号之一</span>
+          </n-form-item>
           <n-form-item label="抓取通道">
             <n-select
               v-model:value="form.fetchChannel"
@@ -352,6 +358,12 @@ async function runAlerts(): Promise<void> {
 .opt-hint {
   font-size: 12px;
   color: var(--text-color-3);
+}
+
+.setting-hint {
+  font-size: 12px;
+  color: var(--text-color-3);
+  margin-left: 8px;
 }
 
 .env-info {

@@ -233,6 +233,32 @@ function valClass(v: number | null | undefined): string {
   return v <= 0.3 ? 'val-cheap' : v >= 0.7 ? 'val-rich' : 'muted'
 }
 
+// ---------- 规则引擎打分（确定性量化快照，展示用，不驱动建议） ----------
+
+function fmtAxis(v: number): string {
+  return `${v >= 0 ? '+' : ''}${v.toFixed(2)}`
+}
+
+/** 轴分：|分|≥1.5 视为强信号（正→绿、负→红），弱信号灰色 */
+function axisClass(v: number): string {
+  return v >= 1.5 ? 'rule-pos' : v <= -1.5 ? 'rule-neg' : 'muted'
+}
+
+function ruleActionCn(a: 'add' | 'reduce' | 'hold'): string {
+  return a === 'add' ? '加仓' : a === 'reduce' ? '减仓' : '持有'
+}
+
+function ruleActionType(a: 'add' | 'reduce' | 'hold'): 'success' | 'error' | 'default' {
+  return a === 'add' ? 'success' : a === 'reduce' ? 'error' : 'default'
+}
+
+const ruleAxes = [
+  { key: 'momentum', label: '动量轴' },
+  { key: 'shape', label: '形态轴' },
+  { key: 'intraday', label: '盘中轴' },
+  { key: 'news', label: '新闻轴' }
+] as const
+
 /** 夏普等指标取 null 时不参与涨跌配色 */
 function toneClass(tone: number | null): string {
   if (tone === null) return 'muted'
@@ -381,6 +407,35 @@ watch(
             </n-tag>
           </div>
           <p v-else class="metric-note muted">基准指数日K暂不可用，本次只展示基金自身指标。</p>
+        </n-card>
+
+        <n-card title="规则引擎打分（确定性量化参考）" class="rule-card">
+          <template v-if="detail.ruleScore">
+            <div class="rule-grid">
+              <div class="rule-axis" v-for="ax in ruleAxes" :key="ax.key">
+                <span class="rule-axis-name">{{ ax.label }}</span>
+                <span class="rule-axis-val" :class="axisClass(detail.ruleScore.breakdown[ax.key])">
+                  {{ fmtAxis(detail.ruleScore.breakdown[ax.key]) }}
+                </span>
+              </div>
+              <div class="rule-total">
+                <span class="rule-axis-name">加权总分</span>
+                <b :class="axisClass(detail.ruleScore.breakdown.total)">{{ fmtAxis(detail.ruleScore.breakdown.total) }}</b>
+                <span class="rule-action">
+                  <n-tag size="small" :bordered="false" :type="ruleActionType(detail.ruleScore.breakdown.action)">
+                    {{ ruleActionCn(detail.ruleScore.breakdown.action) }}
+                  </n-tag>
+                  置信 {{ detail.ruleScore.breakdown.confidence }}/100
+                </span>
+              </div>
+            </div>
+            <p class="val-hint">
+              规则分由确定性公式算出（动量/形态/盘中/新闻四轴 ∈[-3,+3] 加权）。
+              <b>仅作交叉验证的一路参考信号，不单独构成操作依据</b>——回测显示其方向命中率≈50%，
+              无短周期预测力。是否把规则分注入 AI 分析可在「设置」里开关。
+            </p>
+          </template>
+          <n-empty v-else description="规则分计算失败或数据不足（需净值≥21日与新闻源可用）" />
         </n-card>
 
         <n-card title="板块估值分位（长周期参考）" class="valuation-card">
@@ -564,8 +619,55 @@ watch(
 .advice-card,
 .review-card,
 .metric-card,
-.valuation-card {
+.valuation-card,
+.rule-card {
   margin-top: 16px;
+}
+
+/* ---------- 规则引擎打分卡 ---------- */
+
+.rule-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+  font-size: 13px;
+}
+
+.rule-axis,
+.rule-total {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rule-axis-name {
+  color: var(--text-color-2);
+}
+
+.rule-axis-val {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  min-width: 44px;
+}
+
+.rule-total b {
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+}
+
+.rule-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-color-2);
+}
+
+.rule-pos {
+  color: #1f9d55;
+}
+
+.rule-neg {
+  color: #e5484d;
 }
 
 /* ---------- 板块估值分位卡 ---------- */
