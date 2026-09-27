@@ -25,13 +25,16 @@ export interface SchedulerState {
   lastEstimateAt: number
   navTodayDone: boolean
   adviceTodayDone: boolean
+  valuationTodayDone: boolean
   lastLog: string
 }
 
-let state: SchedulerState = { running: false, lastEstimateAt: 0, navTodayDone: false, adviceTodayDone: false, lastLog: '未启动' }
+let state: SchedulerState = { running: false, lastEstimateAt: 0, navTodayDone: false, adviceTodayDone: false, valuationTodayDone: false, lastLog: '未启动' }
 let timer: NodeJS.Timeout | null = null
 // 本会话已做过"今日是否已分析"DB 检查的日期（跨天感知：昨天查过的结果不影响今天）
 let adviceCheckedDate: string | null = null
+// 本会话已确认"今日估算值快照是否已入库"的日期（跨天感知）
+let valuationCheckedDate: string | null = null
 
 /** 是否已确认目标交易日净值（所有用户自选基金并集都出净值才算，多用户 M9）。
  *  交易日目标=today；非交易日目标=最近交易日（周五净值周六凌晨公布是常态，周六盘后也要补） */
@@ -79,6 +82,30 @@ async function tick(): Promise<void> {
 
   try {
     await ensureSchema(pool)
+
+    // 0. 指数估值快照（价值因子）：每自然日一次，收盘后（15:00 起）抓蛋卷当日快照落库，累积历史。
+    //    交易/非交易日都抓（快照是日历日粒度的，周末也有当日值）；以 index_valuation 当日记录判重（跨重启不重跑）。
+    {
+      const today = todayStr()
+      if (valuationCheckedDate !== today) {
+        const rCheck = await pool.query('SELECT 1 FROM index_valuation WHERE trade_date = $1 LIMIT 1', [today])
+        state.valuationTodayDone = rCheck.rows.length > 0
+        valuationCheckedDate = today
+      }
+      if (!state.valuationTodayDone && m >= 15 * 60) {
+        try {
+          const { fetchIndexValuations, storeIndexValuations } = await import('./crawler/indexValuation')
+          const items = await fetchIndexValuations()
+          const stored = await storeIndexValuations(pool, today, items)
+          state.valuationTodayDone = stored > 0
+          state.lastLog = `指数估值快照 ${stored} 个板块（${today}）`
+          console.log(`[scheduler] ${state.lastLog}`)
+          logInfo(`[scheduler] ${state.lastLog}`)
+        } catch (e) {
+          logWarn(`[scheduler] 指数估值快照失败: ${(e as Error).message}`)
+        }
+      }
+    }
 
     // 1. 盘中估值采样（每 estimateIntervalSeconds 一次；仅交易日）
     if (trading && isIntraday(m)) {
