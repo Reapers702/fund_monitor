@@ -139,7 +139,30 @@ export const SCHEMA_STATEMENTS: string[] = [
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       CONSTRAINT uq_alert_log UNIQUE (user_id, fund_code, alert_type, trade_date)
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_alert_log ON alert_log (trade_date DESC)`
+  `CREATE INDEX IF NOT EXISTS idx_alert_log ON alert_log (trade_date DESC)`,
+
+  // ---------- 指数估值分位（价值因子，M10） ----------
+  // 数据源：蛋卷 index_eva 快照（免鉴权），每日落一版。pe/pb 及历史分位（0~1）。
+  // eva_type：low/mid/high（低估/适中/高估）。index_code 为数据源自有代码（如 SZ399975）。
+  // 用途：基金→跟踪板块指数估值分位，作为"当前贵/便宜"的长周期参考轴（不直接做短周期方向）。
+  `CREATE TABLE IF NOT EXISTS index_valuation (
+      id             BIGSERIAL PRIMARY KEY,
+      index_code     VARCHAR(32)  NOT NULL,
+      index_name     TEXT         NOT NULL,
+      trade_date     DATE         NOT NULL,
+      source         VARCHAR(16)  NOT NULL DEFAULT 'danjuan',
+      pe             NUMERIC(10,4),
+      pe_percentile  NUMERIC(6,4),
+      pb             NUMERIC(10,4),
+      pb_percentile  NUMERIC(6,4),
+      roe            NUMERIC(8,4),
+      pe_over_history NUMERIC(6,4),
+      pb_over_history NUMERIC(6,4),
+      eva_type       VARCHAR(8),
+      created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+      CONSTRAINT uq_index_val UNIQUE (index_code, trade_date, source)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_index_val ON index_valuation (index_code, trade_date DESC)`
 ]
 
 // 单用户 → 多用户迁移（幂等，仅对已有旧库生效；新库直接走 SCHEMA_STATEMENTS 新结构）：

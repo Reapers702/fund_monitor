@@ -165,6 +165,16 @@ if (process.argv.includes('--check')) {
     const range = rIdx >= 0 ? Number(process.argv[rIdx + 1]) || 500 : 500
     app.exit(await runRotateBacktest(codesOverride, days, range))
   })
+} else if (process.argv.includes('--valuation')) {
+  // 指数估值分位（价值因子）：electron . --valuation [--codes ...]
+  // 拉蛋卷快照落库 + 打印每只自选基金对应板块的 PE/PB 历史分位（长周期参考，非短周期方向）
+  app.whenReady().then(async () => {
+    const { runIndexValuation } = await import('./crawler/indexValuation')
+    let codesOverride: string[] | undefined
+    const cIdx = process.argv.indexOf('--codes')
+    if (cIdx >= 0 && process.argv[cIdx + 1]) codesOverride = process.argv[cIdx + 1].split(',').map((s) => s.trim()).filter(Boolean)
+    app.exit(await runIndexValuation(codesOverride))
+  })
 } else if (process.argv.includes('--ai-test')) {
   // 开发辅助：electron . --ai-test ["提示词"] 验证 DeepSeek 连通性
   app.whenReady().then(async () => {
