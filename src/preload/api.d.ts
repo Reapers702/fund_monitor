@@ -159,6 +159,20 @@ interface FundDetail {
   metrics: FundMetrics
   relativeStrength: RelativeStrength | null // 基准日K取不到时为 null（只展示基金自身指标）
   currentWeightPct: number | null // 该基金当前占组合比例 %（无持仓为 null，用于对比建议仓位）
+  valuation: FundValuation | null // 板块指数估值分位（长周期参考轴，无匹配/无快照为 null）
+}
+
+// ---------- 板块估值分位（index_valuation，长周期参考，非短周期方向） ----------
+
+interface FundValuation {
+  indexCode: string
+  indexName: string
+  pe: number | null
+  pePercentile: number | null // 0~1，越低越便宜
+  pb: number | null
+  pbPercentile: number | null
+  evaType: 'low' | 'mid' | 'high' | null // 低估/适中/高估
+  tradeDate: string // 快照截至日期
 }
 
 // ---------- AI 建议复盘（analyzer/review 计算，随 fund:detail 返回） ----------

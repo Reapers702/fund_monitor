@@ -212,6 +212,27 @@ const metricItems = computed(() => {
 /** 相对基准超额（基准取不到时为空数组，卡片只显示基金自身指标） */
 const excessItems = computed(() => detail.value?.relativeStrength?.windows.filter((w) => w.excess !== null) ?? [])
 
+// ---------- 板块估值分位（长周期参考，非短周期方向） ----------
+
+function fmtPercentile(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return '--'
+  return `${(v * 100).toFixed(1)}%`
+}
+
+function zoneLabel(t?: 'low' | 'mid' | 'high' | null): string {
+  return t === 'low' ? '低估' : t === 'high' ? '高估' : t === 'mid' ? '适中' : '--'
+}
+
+function zoneType(t?: 'low' | 'mid' | 'high' | null): 'success' | 'error' | 'warning' | 'default' {
+  return t === 'low' ? 'success' : t === 'high' ? 'error' : t === 'mid' ? 'warning' : 'default'
+}
+
+/** 分位越低→便宜(绿色)、越高→贵(红色)；中间灰 */
+function valClass(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return 'muted'
+  return v <= 0.3 ? 'val-cheap' : v >= 0.7 ? 'val-rich' : 'muted'
+}
+
 /** 夏普等指标取 null 时不参与涨跌配色 */
 function toneClass(tone: number | null): string {
   if (tone === null) return 'muted'
@@ -360,6 +381,29 @@ watch(
             </n-tag>
           </div>
           <p v-else class="metric-note muted">基准指数日K暂不可用，本次只展示基金自身指标。</p>
+        </n-card>
+
+        <n-card title="板块估值分位（长周期参考）" class="valuation-card">
+          <template v-if="detail.valuation">
+            <div class="val-row">
+              <span class="val-index">{{ detail.valuation.indexName }}</span>
+              <n-tag size="small" :bordered="false" :type="zoneType(detail.valuation.evaType)">
+                {{ zoneLabel(detail.valuation.evaType) }}
+              </n-tag>
+              <span class="val-num">
+                PE历史分位
+                <b :class="valClass(detail.valuation.pePercentile)">{{ fmtPercentile(detail.valuation.pePercentile) }}</b>
+              </span>
+              <span class="val-num">PB历史分位 {{ fmtPercentile(detail.valuation.pbPercentile) }}</span>
+              <span class="val-num">PE {{ detail.valuation.pe !== null ? detail.valuation.pe.toFixed(2) : '--' }}</span>
+              <span class="val-date">截至 {{ detail.valuation.tradeDate || '--' }}</span>
+            </div>
+            <p class="val-hint">
+              估值分位是<b>长周期（数年）</b>的贵/便宜参考：低估≠短期会上涨、高估≠短期会跌，
+              <b>不可用于 T+5/T+10 加减仓方向</b>；可在整体定投/补仓节奏上作辅助择时。
+            </p>
+          </template>
+          <n-empty v-else description="未匹配到板块指数，或暂无估值快照（需靠每日自动抓取累积）" />
         </n-card>
 
         <n-card title="重仓股（近10日表现）" class="hold-card">
@@ -519,8 +563,55 @@ watch(
 .hold-card,
 .advice-card,
 .review-card,
-.metric-card {
+.metric-card,
+.valuation-card {
   margin-top: 16px;
+}
+
+/* ---------- 板块估值分位卡 ---------- */
+
+.val-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.val-index {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.val-num {
+  color: var(--text-color-2);
+}
+
+.val-num b {
+  font-variant-numeric: tabular-nums;
+}
+
+.val-date {
+  font-size: 12px;
+  color: var(--text-color-3);
+  margin-left: auto;
+}
+
+.val-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-color-3);
+}
+
+.val-cheap {
+  color: #1f9d55;
+  font-weight: 700;
+}
+
+.val-rich {
+  color: #e5484d;
+  font-weight: 700;
 }
 
 /* ---------- 量化指标卡 ---------- */

@@ -178,6 +178,87 @@ export function matchIndex(
   return best ? { item: best, score: bestScore } : null
 }
 
+// ---------- 查询侧（详情页 IPC 用） ----------
+
+function rowToValuation(x: {
+  index_code: string
+  index_name: string
+  pe: string | null
+  pe_percentile: string | null
+  pb: string | null
+  pb_percentile: string | null
+  eva_type: string | null
+}): IndexValuation {
+  return {
+    indexCode: x.index_code,
+    indexName: x.index_name,
+    pe: num(x.pe),
+    pePercentile: num(x.pe_percentile),
+    pb: num(x.pb),
+    pbPercentile: num(x.pb_percentile),
+    roe: null,
+    peOverHistory: null,
+    pbOverHistory: null,
+    evaType: evaTypeOf(x.eva_type ?? undefined)
+  }
+}
+
+/** 取库里最新一版快照（trade_date 最大者）及其日期 */
+export async function latestIndexValuations(
+  pool: Pool
+): Promise<{ tradeDate: string | null; items: IndexValuation[] }> {
+  const r = await pool.query<{
+    index_code: string
+    index_name: string
+    pe: string | null
+    pe_percentile: string | null
+    pb: string | null
+    pb_percentile: string | null
+    eva_type: string | null
+    trade_date: Date
+  }>(
+    `SELECT index_code, index_name, pe, pe_percentile, pb, pb_percentile, eva_type, trade_date
+     FROM index_valuation
+     WHERE trade_date = (SELECT MAX(trade_date) FROM index_valuation)`
+  )
+  const items = r.rows.map(rowToValuation)
+  return { tradeDate: r.rows[0] ? dateOnlyOf(r.rows[0].trade_date) : null, items }
+}
+
+const dateOnlyOf = (d: Date): string => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+/** 单只基金 → 板块估值分位（无匹配/无快照返回 null） */
+export async function valuationForFund(
+  pool: Pool,
+  fundName: string
+): Promise<FundValuation | null> {
+  const { tradeDate, items } = await latestIndexValuations(pool)
+  if (items.length === 0) return null
+  const m = matchIndex(fundName, items)
+  if (!m) return null
+  return {
+    indexCode: m.item.indexCode,
+    indexName: m.item.indexName,
+    pe: m.item.pe,
+    pePercentile: m.item.pePercentile,
+    pb: m.item.pb,
+    pbPercentile: m.item.pbPercentile,
+    evaType: m.item.evaType,
+    tradeDate: tradeDate ?? ''
+  }
+}
+
+export interface FundValuation {
+  indexCode: string
+  indexName: string
+  pe: number | null
+  pePercentile: number | null // 0~1
+  pb: number | null
+  pbPercentile: number | null
+  evaType: IndexValuation['evaType']
+  tradeDate: string
+}
+
 const pct = (v: number | null, d = 0): string => (v === null || v === 0 ? '--' : `${(v * 100).toFixed(d).padStart(2, ' ')}%`)
 const zoneName = (t: IndexValuation['evaType']): string => (t === 'low' ? '低估' : t === 'high' ? '高估' : t === 'mid' ? '适中' : '--')
 

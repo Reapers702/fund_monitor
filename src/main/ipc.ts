@@ -22,6 +22,7 @@ import { analyzeFund, saveAdvice, todayStr } from './analyzer/analyze'
 import { evaluateAdviceReviews } from './analyzer/review'
 import { computeFundMetrics, computeRelativeStrength } from './analyzer/metrics'
 import { BENCHMARK_NAME, loadBenchmarkNav, clearBenchmarkCache } from './crawler/benchmark'
+import { valuationForFund } from './crawler/indexValuation'
 import { notifyAdvice } from './notifier'
 import { runQuotesCore } from './quotes'
 import { runAnalyzeAllCore } from './analyze'
@@ -195,7 +196,8 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
         adviceReview: evaluateAdviceReviews(adviceAll, navAll),
         metrics: computeFundMetrics(navAll),
         relativeStrength: benchNav ? computeRelativeStrength(navAll, benchNav, [20, 60], BENCHMARK_NAME) : null,
-        currentWeightPct: currentWeightPct(positions, code)
+        currentWeightPct: currentWeightPct(positions, code),
+        valuation: basic ? await valuationForFund(pool, basic.name) : null
       }
     } finally {
       await pool.end().catch(() => {})
