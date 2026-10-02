@@ -31,6 +31,7 @@
     "rules-backtest": "npm run build && electron . --rules-backtest",
     "rotate-backtest": "npm run build && electron . --rotate-backtest",
     "valuation": "npm run build && electron . --valuation",
+    "sim-backtest": "npm run build && electron . --sim-backtest",
     "test": "vitest run"
   },
   "dependencies": {

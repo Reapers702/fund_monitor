@@ -165,6 +165,30 @@ if (process.argv.includes('--check')) {
     const range = rIdx >= 0 ? Number(process.argv[rIdx + 1]) || 500 : 500
     app.exit(await runRotateBacktest(codesOverride, days, range))
   })
+} else if (process.argv.includes('--sim-backtest')) {
+  // 模拟交易回测（paper trading）：electron . --sim-backtest [--codes ...] [--range N] [--capital C]
+  //   [--step S]（或 --days S）[--add 0.2] [--reduce 0.2] [--fee 0]
+  // 按规则引擎信号固定档位连续调仓，看累计收益，并对比买入持有/空仓基准
+  app.whenReady().then(async () => {
+    const { runSimBacktest } = await import('./simBacktest')
+    let codes: string[] = []
+    const cIdx = process.argv.indexOf('--codes')
+    if (cIdx >= 0 && process.argv[cIdx + 1]) codes = process.argv[cIdx + 1].split(',').map((s) => s.trim()).filter(Boolean)
+    const rIdx = process.argv.indexOf('--range')
+    const range = rIdx >= 0 ? Number(process.argv[rIdx + 1]) || 500 : 500
+    const capIdx = process.argv.indexOf('--capital')
+    const capital = capIdx >= 0 ? Number(process.argv[capIdx + 1]) || 100000 : 100000
+    const sIdx = process.argv.indexOf('--step')
+    const dIdx = process.argv.indexOf('--days')
+    const step = (sIdx >= 0 ? Number(process.argv[sIdx + 1]) : dIdx >= 0 ? Number(process.argv[dIdx + 1]) : 0) || 5
+    const aIdx = process.argv.indexOf('--add')
+    const addPct = aIdx >= 0 ? Number(process.argv[aIdx + 1]) : 0.2
+    const rpIdx = process.argv.indexOf('--reduce')
+    const reducePct = rpIdx >= 0 ? Number(process.argv[rpIdx + 1]) : 0.2
+    const fIdx = process.argv.indexOf('--fee')
+    const feeRate = fIdx >= 0 ? Number(process.argv[fIdx + 1]) || 0 : 0
+    app.exit(await runSimBacktest({ codes, capital: capital < 0 ? 100000 : capital, rangeDays: range, step, addPct, reducePct, feeRate }))
+  })
 } else if (process.argv.includes('--valuation')) {
   // 指数估值分位（价值因子）：electron . --valuation [--codes ...]
   // 拉蛋卷快照落库 + 打印每只自选基金对应板块的 PE/PB 历史分位（长周期参考，非短周期方向）
