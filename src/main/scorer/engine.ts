@@ -64,6 +64,12 @@ export const DEFAULT_WEIGHTS: ScorerWeights = {
 export const ADD_THRESHOLD = 2.0
 export const REDUCE_THRESHOLD = -2.0
 
+/** 可选决策阈值覆盖（默认用上方常量；仅供回测/调参透传，生产不改动） */
+export interface ScoreThresholds {
+  add?: number
+  reduce?: number
+}
+
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
 }
@@ -134,7 +140,8 @@ export function scoreIntraday(intradayPct: number | null): number {
 
 export function score(
   input: ScorerInput,
-  weights: ScorerWeights = DEFAULT_WEIGHTS
+  weights: ScorerWeights = DEFAULT_WEIGHTS,
+  thresholds?: ScoreThresholds
 ): ScoreBreakdown {
   const w = weights
   const momentum = scoreMomentum(input.nav, input.excess20, input.excess60)
@@ -165,7 +172,7 @@ export function score(
   }
   total = clamp(total, -3, 3)
 
-  const action = total >= ADD_THRESHOLD ? 'add' : total <= REDUCE_THRESHOLD ? 'reduce' : 'hold'
+  const action = total >= (thresholds?.add ?? ADD_THRESHOLD) ? 'add' : total <= (thresholds?.reduce ?? REDUCE_THRESHOLD) ? 'reduce' : 'hold'
   const confidence = Math.round((Math.abs(total) / 3) * 100)
 
   return { momentum, shape, intraday, news, totalRaw: base, total, action, confidence }
