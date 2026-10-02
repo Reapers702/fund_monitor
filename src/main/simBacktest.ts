@@ -15,7 +15,7 @@ import { loadConfig } from './config'
 import { createPool, createAiFundPool } from './storage/db'
 import { computeRelativeStrength, periodReturnPct, annualizedReturnPct, maxDrawdownPct } from './analyzer/metrics'
 import { loadBenchmarkNav, BENCHMARK_NAME } from './crawler/benchmark'
-import { score, DEFAULT_WEIGHTS } from './scorer/engine'
+import { score, DEFAULT_WEIGHTS, ADD_THRESHOLD, REDUCE_THRESHOLD } from './scorer/engine'
 import type { ScorerWeights } from './scorer/engine'
 import { navUpTo, navDatesAll, basic, newsUpTo } from './backtestUtil'
 
@@ -28,7 +28,10 @@ export interface SimOptions {
   step: number // 决策步长（共同交易日间隔），默认 5
   addPct: number // add 档位，默认 0.2
   reducePct: number // reduce 档位，默认 0.2
-  feeRate: number // 双边费率，默认 0（公式已预留）
+  addThresh?: number // 加仓阈值覆盖（默认 engine 的 2.0），仅供回测透传
+  reduceThresh?: number // 减仓阈值覆盖（默认 engine 的 -2.0），仅供回测透传
+  feeBuy: number // 申购费率（买入金额计），默认 0.15%
+  feeSell: number // 赎回费率（卖出金额计），默认 0.5%
   weightsOverrides?: Partial<ScorerWeights>
 }
 
@@ -114,9 +117,13 @@ export async function runSimBacktest(opts: SimOptions): Promise<number> {
     // ---- 参数 ----
     const addPct = opts.addPct > 0 ? opts.addPct : 0
     const reducePct = opts.reducePct > 0 ? opts.reducePct : 0
-    const feeRate = opts.feeRate > 0 ? opts.feeRate : 0
+    const feeBuy = opts.feeBuy > 0 ? opts.feeBuy : 0
+    const feeSell = opts.feeSell > 0 ? opts.feeSell : 0
     const step = Math.max(1, Math.round(opts.step) || 5)
     const weights: ScorerWeights = { ...DEFAULT_WEIGHTS, ...(opts.weightsOverrides ?? {}) }
+    // 决策阈值：加仓阈值/减仓阈值取透传值，缺省回落 engine 常量
+    const addThresh = opts.addThresh !== undefined ? opts.addThresh : ADD_THRESHOLD
+    const reduceThresh = opts.reduceThresh !== undefined ? opts.reduceThresh : REDUCE_THRESHOLD
 
     // code -> 完整净值按 date 建索引（未来窗口用）
     const navIdx = new Map<string, Map<string, number>>()
@@ -140,6 +147,8 @@ export async function runSimBacktest(opts: SimOptions): Promise<number> {
     const lastNav = new Map<string, number>()
     let decisionCount = 0
     let totalTurnover = 0
+    let totalBuyAmt = 0
+    let totalSellAmt = 0 // 累计单边申购/赎回金额（算总费用用）
 
     const navAt = (code: string, date: string): number | null => allNav.get(code)!.find((p) => p.date === date)?.nav ?? null
 
@@ -153,7 +162,7 @@ export async function runSimBacktest(opts: SimOptions): Promise<number> {
     console.log('='.repeat(100))
     console.log(`基金（${evalCodes.length} 只）: ${evalCodes.map((c) => `${c} ${names.get(c)}`).join('、')}`)
     console.log(`区间：${startDate} ~ ${endDate}（共同交易日 ${axis.length} 个），初始资金 ¥${opts.capital.toLocaleString()}`)
-    console.log(`决策步长：每 ${step} 个共同交易日｜档位 add+${Math.round(addPct * 100)}% / reduce-${Math.round(reducePct * 100)}% ｜费率 ${Math.round(feeRate * 100)}%`)
+    console.log(`决策步长：每 ${step} 个共同交易日｜档位 add+${Math.round(addPct * 100)}% / reduce-${Math.round(reducePct * 100)}% ｜阈值 add≥+${addThresh} / reduce≤${reduceThresh} ｜费率 申购${Math.round(feeBuy * 10000) / 100}% / 赎回${Math.round(feeSell * 10000) / 100}%`)
     console.log('-' .repeat(100))
 
     for (let ai = 0; ai < axis.length; ai++) {
@@ -177,6 +186,9 @@ export async function runSimBacktest(opts: SimOptions): Promise<number> {
           bhShares.set(code, mv / n)
         }
         cash = opts.capital * (1 - w0 * active.length) // 理论上 0
+        // 建仓即一次满仓申购，计申购费
+        cash -= opts.capital * w0 * active.length * feeBuy
+        totalBuyAmt += opts.capital * w0 * active.length
         decisionCount++
         totalTurnover += opts.capital // 建仓名义换手 = 满仓资金
       }
@@ -209,7 +221,7 @@ export async function runSimBacktest(opts: SimOptions): Promise<number> {
             return { text: nw.title ?? '', weight: 1, daysAgo: Math.max(0, Math.round((asofMs - pubMs) / 86400000)) }
           })
 
-          const dec = score({ nav: navHist, excess20, excess60, intradayPct: null, news: newsSignals }, weights)
+          const dec = score({ nav: navHist, excess20, excess60, intradayPct: null, news: newsSignals }, weights, { add: addThresh, reduce: reduceThresh })
           const act = dec.action as 'add' | 'reduce' | 'hold'
           const prev = targetWeight.get(code) ?? 0
           const next = act === 'add' ? prev + addPct : act === 'reduce' ? prev - reducePct : prev
@@ -245,21 +257,34 @@ export async function runSimBacktest(opts: SimOptions): Promise<number> {
         let totalValue = cash
         for (const code of evalCodes) totalValue += (shares.get(code) ?? 0) * (lastNav.get(code) ?? 0)
         let turnover = 0
+        let buyAmt = 0
+        let sellAmt = 0 // 本决策日单边买入/卖出金额（计费用）
         for (const code of evalCodes) {
           const n = lastNav.get(code)
           if (!n) continue
           const w = targetWeight.get(code) ?? 0
           const targetMV = totalValue * w
           const oldMV = (shares.get(code) ?? 0) * n
-          const deltaCash = oldMV - targetMV // >0 卖出回笼 / <0 买入支出
+          const delta = oldMV - targetMV // >0 卖出回笼 / <0 买入支出
           shares.set(code, n > 0 ? targetMV / n : 0)
-          cash += deltaCash
-          turnover += Math.abs(deltaCash)
-          // 成本基准：买入增、卖出按份额冲减（按整体卖出 × 原成本费率简化为全额冲减）
-          if (deltaCash < 0) costBasis.set(code, (costBasis.get(code) ?? 0) - deltaCash)
-          else costBasis.set(code, Math.max(0, (costBasis.get(code) ?? 0) - deltaCash))
+          cash += delta
+          turnover += Math.abs(delta)
+          // 成本基准（净投入）：买入加、卖出减，**不截断**。
+          // 浮盈清仓时（成本100/市值150/全卖）净投入应变成 -50，把 +50 剩余市值差留作已实现贡献，
+          // 以保证 cash + ΣcostBasis ≡ capital - 总费用 恒等（Σ贡献才能自洽=策略收益）。
+          if (delta < 0) {
+            costBasis.set(code, (costBasis.get(code) ?? 0) - delta)
+            buyAmt += -delta
+          } else {
+            costBasis.set(code, (costBasis.get(code) ?? 0) - delta)
+            sellAmt += delta
+          }
         }
-        cash -= turnover * feeRate // 卖出方也收，取双边近似
+        // 单边费率：申购按买入额、赎回按卖出额
+        cash -= buyAmt * feeBuy
+        cash -= sellAmt * feeSell
+        totalBuyAmt += buyAmt
+        totalSellAmt += sellAmt
         totalTurnover += turnover
       }
 
@@ -303,7 +328,7 @@ export async function runSimBacktest(opts: SimOptions): Promise<number> {
       fundContrib.push({ code, name: names.get(code)!, contribPct: opts.capital > 0 ? ((endMV - cb) / opts.capital) * 100 : null })
     }
 
-    console.log('\n【策略】（step=${step}, add±' + Math.round(addPct * 100) + '%, fee ' + Math.round(feeRate * 100) + '%）')
+    console.log(`\n【策略】（step=${step}, add±${Math.round(addPct * 100)}%, thresh≥+${addThresh}/${reduceThresh}, 申购${Math.round(feeBuy * 10000) / 100}%/赎回${Math.round(feeSell * 10000) / 100}%）`)
     console.log(`  累计收益 ${fmtPct(strat.totalReturnPct)} ｜ 年化 ${fmtPct(strat.annualizedReturnPct)} ｜ 最大回撤 ${fmtPct(strat.maxDrawdownPct)} ｜ 期末现金占比 ${(strat.cashWeightEnd * 100).toFixed(1)}%`)
     console.log(`  决策 ${decisionCount} 次 ｜ 总换手 ¥${totalTurnover.toLocaleString()}（≈${((totalTurnover / opts.capital) * 100).toFixed(0)}% 初始资金）`)
     console.log('\n【买入持有基准】（起点等权全仓，此后不动）')
@@ -312,13 +337,15 @@ export async function runSimBacktest(opts: SimOptions): Promise<number> {
     console.log('\n【动作分布】' + (Object.keys(CN) as (keyof typeof CN)[]).map((a) => `${CN[a]} ×${samples.filter((s) => s.action === a).length}`).join(' ｜ '))
 
     const sumContrib = fundContrib.reduce((s, f) => s + (f.contribPct ?? 0), 0)
-    console.log('\n【每基金贡献】（近似分解，(期末市值-累计净投入)/初始资金；合计≈策略累计收益）')
+    // 自洽校验：Σ(endMV - costBasis) = totalValueEnd - capital + 总费用，故 策略收益 = Σ贡献 - 费用%
+    const totalFeePct = opts.capital > 0 ? ((totalBuyAmt * feeBuy + totalSellAmt * feeSell) / opts.capital) * 100 : 0
+    console.log('\n【每基金贡献】（分解，(期末市值-净投入)/初始资金；不截断净投入以保自洽）')
     for (const f of fundContrib) console.log(`  ${f.code} ${f.name}: ${fmtPct(f.contribPct)}`)
-    console.log(`  Σ 贡献 ${fmtPct(sumContrib)} ｜ 策略 ${fmtPct(strat.totalReturnPct)}`)
+    console.log(`  Σ 贡献 ${fmtPct(sumContrib)} ｜ 总费用 ${fmtPct(totalFeePct)} ｜ 策略 ${fmtPct(strat.totalReturnPct)}（校验：Σ贡献 ± 费用 ≈ 策略）`)
 
     console.log('\n【方向命中率 vs 模拟累计收益（并列）】')
     console.log(`  方向命中率（T+5，决策样本，add后涨/reduce后跌）: ${dir.length ? Math.round((dirHit / dir.length) * 100) + '%' : '--'}（${dirHit}/${dir.length}）  ← 与 rulesBacktest 同口径`)
-    console.log(`  模拟累计收益（step=${step}, add±${Math.round(addPct * 100)}%, fee ${Math.round(feeRate * 100)}%）: ${fmtPct(strat.totalReturnPct)} ｜ 年化 ${fmtPct(strat.annualizedReturnPct)} ｜ 买入持有 ${fmtPct(bh.totalReturnPct)} ｜ 现金 0%`)
+    console.log(`  模拟累计收益（step=${step}, add±${Math.round(addPct * 100)}%, thresh≥+${addThresh}/${reduceThresh}, 申购${Math.round(feeBuy * 10000) / 100}%/赎回${Math.round(feeSell * 10000) / 100}%）: ${fmtPct(strat.totalReturnPct)} ｜ 年化 ${fmtPct(strat.annualizedReturnPct)} ｜ 买入持有 ${fmtPct(bh.totalReturnPct)} ｜ 现金 0%`)
     console.log('  注：命中率只看单次方向（≈随机 50%）；模拟收益整合了调仓频率/幅度/现金占比/交易损耗/连续复利——命中率高不一定赚钱（高频瞎换、长期空仓都会脱钩），并列才能回答「建议能否用来赚钱」。')
 
     console.log('\n【净值曲线抽样】（日期 | 策略 | 买入持有 | 空仓），单位累计收益 %：')
@@ -330,7 +357,7 @@ export async function runSimBacktest(opts: SimOptions): Promise<number> {
       console.log(`  ${m.date} | ${fmtPct(s)} | ${fmtPct(b)} | 0.00%`)
     }
 
-    console.log('\n[结论] 模拟只把规则信号按固定档位调仓，费率<' + feeRate + '、现金无收益；与买入持有/空仓对比看信号是否真创造 alpha。样本有限，注意置信区间。')
+    console.log(`\n[结论] 模拟只把规则信号按固定档位调仓，费率（申购${Math.round(feeBuy * 10000) / 100}%/赎回${Math.round(feeSell * 10000) / 100}%）、现金无收益；与买入持有/空仓对比看信号是否真创造 alpha。样本有限，注意置信区间。`)
     return 0
   } finally {
     await pool.end().catch(() => {})

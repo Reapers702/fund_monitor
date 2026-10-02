@@ -167,7 +167,8 @@ if (process.argv.includes('--check')) {
   })
 } else if (process.argv.includes('--sim-backtest')) {
   // 模拟交易回测（paper trading）：electron . --sim-backtest [--codes ...] [--range N] [--capital C]
-  //   [--step S]（或 --days S）[--add 0.2] [--reduce 0.2] [--fee 0]
+  //   [--step S]（或 --days S）[--add 0.2] [--reduce 0.2] [--add-thresh 1.2] [--reduce-thresh -1.2]
+  //   [--fee-buy 0.0015] [--fee-sell 0.005]
   // 按规则引擎信号固定档位连续调仓，看累计收益，并对比买入持有/空仓基准
   app.whenReady().then(async () => {
     const { runSimBacktest } = await import('./simBacktest')
@@ -185,9 +186,15 @@ if (process.argv.includes('--check')) {
     const addPct = aIdx >= 0 ? Number(process.argv[aIdx + 1]) : 0.2
     const rpIdx = process.argv.indexOf('--reduce')
     const reducePct = rpIdx >= 0 ? Number(process.argv[rpIdx + 1]) : 0.2
-    const fIdx = process.argv.indexOf('--fee')
-    const feeRate = fIdx >= 0 ? Number(process.argv[fIdx + 1]) || 0 : 0
-    app.exit(await runSimBacktest({ codes, capital: capital < 0 ? 100000 : capital, rangeDays: range, step, addPct, reducePct, feeRate }))
+    const atIdx = process.argv.indexOf('--add-thresh')
+    const addThresh = atIdx >= 0 ? Number(process.argv[atIdx + 1]) : undefined
+    const rtIdx = process.argv.indexOf('--reduce-thresh')
+    const reduceThresh = rtIdx >= 0 ? Number(process.argv[rtIdx + 1]) : undefined
+    const fbIdx = process.argv.indexOf('--fee-buy')
+    const feeBuy = fbIdx >= 0 ? Number(process.argv[fbIdx + 1]) : 0.0015
+    const fsIdx = process.argv.indexOf('--fee-sell')
+    const feeSell = fsIdx >= 0 ? Number(process.argv[fsIdx + 1]) : 0.005
+    app.exit(await runSimBacktest({ codes, capital: capital < 0 ? 100000 : capital, rangeDays: range, step, addPct, reducePct, addThresh, reduceThresh, feeBuy, feeSell }))
   })
 } else if (process.argv.includes('--valuation')) {
   // 指数估值分位（价值因子）：electron . --valuation [--codes ...]
