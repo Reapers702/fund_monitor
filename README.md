@@ -89,12 +89,6 @@ npm run build:win
 | `electron . --alerts [--scope intraday\|close]`（`npm run alerts`） | 手动跑一轮提醒检查（不传 `--scope` 时盘中+盘后两轮都跑），同一天同类已推过的不重复推 | 与设置页"立即检查提醒"等价，日常由后台调度器按点自动执行 |
 | `electron . --analyze <code>`（`npm run analyze -- <code>`） | 单只基金 AI 分析（按 guanxin 用户持仓） | 与 GUI 基金详情页"立即分析"等价，日常用 GUI |
 | `electron . --analyze-all`（`npm run analyze-all`） | 所有用户 × 各自自选基金 AI 分析 | 与 GUI"全部 AI 分析"按钮等价，日常由后台调度器 15:35 自动执行 |
-| `electron . --ai-test` | 验证 DeepSeek 链路（配置/连通/一次对话） | 调试用 |
-| `electron . --calendar-test` | 交易日历自检（三级降级：腾讯日K → 百度节假日 → 静态表） | 调试用 |
-| `electron . --page-test <url>` | 隐藏窗口抓页验证 | 调试用 |
-| `electron . --screenshot <path> [--route <hash>] [--viewport-height <px>] [--wait <ms>]` | 开发辅助：加载页面截图（加高视口截整页；懒加载路由如详情页需 `--wait` 调大等待） | 开发用 |
-
-> 注：Windows Git Bash 下 `--route "/"` 需加 `MSYS_NO_PATHCONV=1` 前缀，否则 `/` 会被转成路径。
 
 ## 数据库
 
@@ -145,7 +139,7 @@ npm run build:win
 ```
 src/
 ├── main/                  # 主进程
-│   ├── index.ts           # 入口 + CLI 分支（--check/--fund/--quotes/--news/--alerts/--analyze/--analyze-all/--ai-test/--calendar-test/--screenshot）
+│   ├── index.ts           # 入口 + CLI 分支（--check/--fund/--quotes/--news/--alerts/--analyze/--analyze-all/--valuation/--*-backtest）
 │   ├── ipc.ts             # IPC 处理器（funds/position/news/advice/alerts/config）
 │   ├── config.ts          # 配置（config.json + .env 回退）
 │   ├── crawler/           # 抓取（httpClient/pageFetcher/eastmoney/danjuan/market/estimate/benchmark）

@@ -16,7 +16,6 @@
     "build": "npm run typecheck && electron-vite build",
     "check": "npm run build && electron . --check",
     "fund": "npm run build && electron . --fund",
-    "page-test": "npm run build && electron . --page-test",
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && electron-builder --win",
