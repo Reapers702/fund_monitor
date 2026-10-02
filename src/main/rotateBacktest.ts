@@ -9,45 +9,11 @@
 //       - 每个采样日，对各基金用 computeRelativeStrength 算过去 20/60 日相对沪深300 超额，据此排名。
 //       - 评估未来 T+5 / T+10：最强 vs 最弱 vs 等权（同类平均）vs 沪深300 基准。
 //       - 统计"排名持续性"：过去排名与未来收益排名的关联、最强基金跑赢同类均值的频率。
-import type { Pool } from 'pg'
 import { loadConfig } from './config'
 import { createPool, createAiFundPool } from './storage/db'
 import { computeRelativeStrength } from './analyzer/metrics'
 import { loadBenchmarkNav, BENCHMARK_NAME } from './crawler/benchmark'
-
-const dateOnly = (d: Date): string => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-const todayISO = () => dateOnly(new Date())
-const addDays = (iso: string, n: number): string => {
-  const d = new Date(iso + 'T00:00:00')
-  d.setDate(d.getDate() + n)
-  return dateOnly(d)
-}
-
-/** 净值：截至 asof 当日（含）升序，用于算过去窗口超额 */
-async function navUpTo(pool: Pool, code: string, asof: string, limit = 120): Promise<{ date: string; nav: number }[]> {
-  const r = await pool.query<{ trade_date: Date; dwjz: string }>(
-    `SELECT trade_date, dwjz FROM fund_nav_daily
-     WHERE fund_code = $1 AND trade_date <= $2
-     ORDER BY trade_date DESC LIMIT $3`,
-    [code, asof, limit]
-  )
-  return r.rows.reverse().map((x) => ({ date: dateOnly(x.trade_date), nav: Number(x.dwjz) }))
-}
-
-/** 完整升序净值（评估未来窗口） */
-async function navDatesAll(pool: Pool, code: string): Promise<{ date: string; nav: number }[]> {
-  const r = await pool.query<{ trade_date: Date; dwjz: string }>(
-    `SELECT trade_date, dwjz FROM fund_nav_daily WHERE fund_code = $1 ORDER BY trade_date ASC`,
-    [code]
-  )
-  return r.rows.map((x) => ({ date: dateOnly(x.trade_date), nav: Number(x.dwjz) }))
-}
-
-async function basic(pool: Pool, code: string): Promise<{ name: string } | null> {
-  const r = await pool.query<{ fund_name: string }>(`SELECT fund_name FROM fund_basic WHERE fund_code = $1`, [code])
-  const x = r.rows[0]
-  return x ? { name: x.fund_name } : null
-}
+import { todayISO, addDays, navUpTo, navDatesAll, basic } from './backtestUtil'
 
 function pct(v: number | null): string {
   return v === null ? '--' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`

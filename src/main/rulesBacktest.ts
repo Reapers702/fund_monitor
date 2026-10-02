@@ -4,70 +4,15 @@
 // 方法：用与 backtest.ts 完全相同的 asof 取数（净值/超额/新闻，截至采样日 T 收盘，无前视），
 //       只是把 LLM 决策换成 [scorer/engine.ts] 的确定性打分规则。
 // 无 LLM → 无随机性、无失败采样、无需 DeepSeek key，速度快且结果 100% 可复现。
-import type { Pool } from 'pg'
 import { loadConfig } from './config'
 import { createPool, createAiFundPool } from './storage/db'
 import { computeRelativeStrength } from './analyzer/metrics'
 import { loadBenchmarkNav, BENCHMARK_NAME } from './crawler/benchmark'
 import { aggregateNewsScore } from './scorer/lexicon'
 import { score, DEFAULT_WEIGHTS, ADD_THRESHOLD, REDUCE_THRESHOLD } from './scorer/engine'
+import { todayISO, addDays, navUpTo, navDatesAll, basic, newsUpTo } from './backtestUtil'
 
 const CN: Record<string, string> = { add: '加仓', reduce: '减仓', hold: '持有' }
-
-const dateOnly = (d: Date): string => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-const todayISO = () => dateOnly(new Date())
-const addDays = (iso: string, n: number): string => {
-  const d = new Date(iso + 'T00:00:00')
-  d.setDate(d.getDate() + n)
-  return dateOnly(d)
-}
-
-/** 净值：截至 asof 当日（含）升序，最多 limit 条 */
-async function navUpTo(pool: Pool, code: string, asof: string, limit = 120): Promise<{ date: string; nav: number }[]> {
-  const r = await pool.query<{ trade_date: Date; dwjz: string }>(
-    `SELECT trade_date, dwjz FROM fund_nav_daily
-     WHERE fund_code = $1 AND trade_date <= $2
-     ORDER BY trade_date DESC LIMIT $3`,
-    [code, asof, limit]
-  )
-  return r.rows.reverse().map((x) => ({ date: dateOnly(x.trade_date), nav: Number(x.dwjz) }))
-}
-
-/** 完整升序净值（评估未来窗口） */
-async function navDatesAll(pool: Pool, code: string): Promise<{ date: string; nav: number }[]> {
-  const r = await pool.query<{ trade_date: Date; dwjz: string }>(
-    `SELECT trade_date, dwjz FROM fund_nav_daily WHERE fund_code = $1 ORDER BY trade_date ASC`,
-    [code]
-  )
-  return r.rows.map((x) => ({ date: dateOnly(x.trade_date), nav: Number(x.dwjz) }))
-}
-
-async function basic(pool: Pool, code: string): Promise<{ name: string } | null> {
-  const r = await pool.query<{ fund_name: string }>(`SELECT fund_name FROM fund_basic WHERE fund_code = $1`, [code])
-  const x = r.rows[0]
-  return x ? { name: x.fund_name } : null
-}
-
-/** 基金名关键词 + 重仓股名（库存 tag 可能没打全，用基金名/股票名做 ILIKE 兜底） */
-async function newsUpTo(
-  aiFundPool: Pool,
-  fundName: string,
-  stockNames: string[],
-  asof: string,
-  limit = 8
-): Promise<{ title: string | null; pubTime: string }[]> {
-  const fundKeywords = [fundName.replace(/[联接A-C0-9]+$/g, '').slice(0, 6)]
-  const tags = [...new Set([...fundKeywords, ...stockNames])].slice(0, 12)
-  if (tags.length === 0) return []
-  const asofAt = new Date(asof + 'T15:40:00')
-  const r = await aiFundPool.query<{ title: string | null; pub_time: Date }>(
-    `SELECT title, pub_time FROM raw_news
-     WHERE (llm_tags ?| $1 OR tags ?| $1 OR title ILIKE ANY ($2)) AND pub_time <= $3
-     ORDER BY pub_time DESC LIMIT $4`,
-    [tags, tags.map((t) => `%${t}%`), asofAt, limit]
-  )
-  return r.rows.map((x) => ({ title: x.title, pubTime: x.pub_time.toISOString() }))
-}
 
 /** 采样日选择：与 backtest 一致的均匀抽样 */
 function pickSampleDates(funds: Map<string, { date: string; nav: number }[]>, recentDays: number, count: number, horizon = 5): string[] {
