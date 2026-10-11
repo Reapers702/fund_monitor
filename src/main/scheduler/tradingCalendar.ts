@@ -33,6 +33,11 @@ const FETCH_LIMIT = 200 // 约 9 个月交易日（实测 lmt=200 有效，超�
 
 let cachedDays: Set<string> | null = null
 let cachedAt = 0
+// 超出腾讯列表范围的降级日志去重：tick 每 30s 调用一次，同一日期只提示一次避免刷屏
+let rangeWarnedDate = ''
+// 腾讯接口失败后的退避截止时间戳：tick 每 30s 调一次，失败不缓存会导致风控期反复轰炸（加重 WAF 拦截）
+let tencentFailedUntil = 0
+const FETCH_FAIL_BACKOFF_MS = 5 * 60_000 // 失败退避 5 分钟，期内直接走百度/静态降级
 
 // ---------- 百度法定节假日缓存 ----------
 
@@ -60,7 +65,7 @@ async function fetchTradingDays(): Promise<string[] | null> {
     const days = arr.map((c) => c[0]).filter((x): x is string => Boolean(x) && /^\d{4}-\d{2}-\d{2}$/.test(x))
     return days.length > 0 ? days : null
   } catch (e) {
-    console.warn(`[calendar] 腾讯交易日接口失败: ${(e as Error).message}`)
+    console.warn(`[calendar] 腾讯ifzq 交易日接口失败: ${(e as Error).message}`)
     return null
   }
 }
@@ -69,8 +74,12 @@ async function fetchTradingDays(): Promise<string[] | null> {
 async function getTradingDaySet(): Promise<Set<string> | null> {
   const now = Date.now()
   if (cachedDays && now - cachedAt < CACHE_TTL_MS) return cachedDays
+  if (now < tencentFailedUntil) return null // 退避期内不请求，直接降级
   const days = await fetchTradingDays()
-  if (!days) return null
+  if (!days) {
+    tencentFailedUntil = Date.now() + FETCH_FAIL_BACKOFF_MS
+    return null
+  }
   cachedDays = new Set(days)
   cachedAt = now
   return cachedDays
@@ -152,7 +161,10 @@ export async function isTradingDay(d = new Date()): Promise<boolean> {
     if (ds >= first && ds <= last) {
       return set.has(ds)
     }
-    console.warn(`[calendar] ${ds} 超出腾讯列表范围（${first}~${last}），降级百度节假日判断`)
+    if (rangeWarnedDate !== ds) {
+      rangeWarnedDate = ds
+      console.warn(`[calendar] ${ds} 超出腾讯列表范围（${first}~${last}），降级百度节假日判断`)
+    }
   }
 
   // 层2：百度法定节假日（休假 + 补班日都休市）

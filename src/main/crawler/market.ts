@@ -17,6 +17,12 @@ export function secidOf(code: string): string {
   return /^[69]/.test(code) ? `1.${code}` : `0.${code}`
 }
 
+// ---------- 数据源中文标识（日志用，便于一眼看清"被拒/重试/成功"链路） ----------
+const SRC_EM = '东财push2' // 实时行情主源
+const SRC_EM_HIS = '东财push2his' // 日K主源
+const SRC_TX_Q = '腾讯qt' // 实时行情降级源
+const SRC_TX_IFZQ = '腾讯ifzq' // 日K降级源
+
 // ---------- push2 熔断器 ----------
 
 let push2BlockedUntil = 0 // 熔断截止时间戳（ms）；0 = 未熔断
@@ -29,7 +35,7 @@ function push2Blocked(): boolean {
 
 /** 触发熔断（连接被拒/持续失败）；供 quote/klines 调用 */
 function blockPush2(): void {
-  if (push2BlockedUntil === 0) console.warn('[market] push2 连接被拒，熔断 5 分钟，行情走腾讯降级')
+  if (push2BlockedUntil === 0) console.warn(`[market] ${SRC_EM} 连接被拒，熔断 5 分钟，行情改走 ${SRC_TX_Q}/${SRC_TX_IFZQ} 降级`)
   push2BlockedUntil = Date.now() + BLOCK_MS
 }
 
@@ -59,11 +65,20 @@ export async function stockQuote(code: string): Promise<StockQuote> {
   return quoteBySecid(secidOf(code))
 }
 
-/** 按完整 secid 查实时行情（指数等非证券代码直接用，如 1.000300），push2 熔断/失败自动降级腾讯 */
-export async function quoteBySecid(secid: string): Promise<StockQuote> {
+/** 按完整 secid 查实时行情（指数等非证券代码直接用，如 1.000300），push2 熔断/失败自动降级腾讯。
+ *  label：可读标识（基金名/股票名），仅用于日志，便于把行情失败定位到具体标的 */
+export async function quoteBySecid(secid: string, label?: string): Promise<StockQuote> {
   const code = secid.split('.')[1] ?? secid
+  const who = label ? `${label}(${code})` : code
   if (push2Blocked()) {
-    return quoteFallbackTencent(secidToMarketCode(secid), code)
+    try {
+      const q = await quoteFallbackTencent(secidToMarketCode(secid), code)
+      console.warn(`[market] 行情 ${who} ← ${SRC_EM} 熔断中，改走 ${SRC_TX_Q} 成功`)
+      return q
+    } catch (e2) {
+      console.error(`[market] 行情 ${who} ← ${SRC_EM} 熔断中，改走 ${SRC_TX_Q} 也失败: ${(e2 as Error).message}`)
+      throw e2
+    }
   }
   try {
     const d = await httpGetJson<{ data?: Record<string, unknown> }>(
@@ -88,8 +103,14 @@ export async function quoteBySecid(secid: string): Promise<StockQuote> {
   } catch (e) {
     const msg = (e as Error).message
     if (isConnError(msg)) blockPush2()
-    console.warn(`[market] push2 ${secid} 失败，降级腾讯: ${msg}`)
-    return quoteFallbackTencent(secidToMarketCode(secid), code)
+    try {
+      const q = await quoteFallbackTencent(secidToMarketCode(secid), code)
+      console.warn(`[market] 行情 ${who} ← ${SRC_EM} 失败(${msg}) → ${SRC_TX_Q} 成功`)
+      return q
+    } catch (e2) {
+      console.error(`[market] 行情 ${who} ← ${SRC_EM} 失败(${msg}) → ${SRC_TX_Q} 也失败: ${(e2 as Error).message}`)
+      throw e2
+    }
   }
 }
 
@@ -146,10 +167,20 @@ export async function stockKlines(code: string, lmt = 120): Promise<{ name: stri
   return klinesBySecid(secidOf(code), lmt)
 }
 
-/** 按完整 secid 取日 K（指数等非证券代码直接用，如 1.000300 沪深300；push2his 熔断/失败降级腾讯） */
-export async function klinesBySecid(secid: string, lmt = 120): Promise<{ name: string; rows: KlineRow[] }> {
+/** 按完整 secid 取日 K（指数等非证券代码直接用，如 1.000300 沪深300；push2his 熔断/失败降级腾讯）。
+ *  label：可读标识（基金名/指数名），仅用于日志 */
+export async function klinesBySecid(secid: string, lmt = 120, label?: string): Promise<{ name: string; rows: KlineRow[] }> {
+  const code = secid.split('.')[1] ?? secid
+  const who = label ? `${label}(${code})` : code
   if (push2Blocked()) {
-    return klinesFallbackTencent(secid, lmt)
+    try {
+      const r = await klinesFallbackTencent(secid, lmt)
+      console.warn(`[market] 日K ${who} ← ${SRC_EM_HIS} 熔断中，改走 ${SRC_TX_IFZQ} 成功(${r.rows.length}条)`)
+      return r
+    } catch (e2) {
+      console.error(`[market] 日K ${who} ← ${SRC_EM_HIS} 熔断中，改走 ${SRC_TX_IFZQ} 也失败: ${(e2 as Error).message}`)
+      throw e2
+    }
   }
   const url =
     `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}` +
@@ -175,8 +206,14 @@ export async function klinesBySecid(secid: string, lmt = 120): Promise<{ name: s
   } catch (e) {
     const msg = (e as Error).message
     if (isConnError(msg)) blockPush2()
-    console.warn(`[market] push2his ${secid} 失败，降级腾讯日K: ${msg}`)
-    return klinesFallbackTencent(secid, lmt)
+    try {
+      const r = await klinesFallbackTencent(secid, lmt)
+      console.warn(`[market] 日K ${who} ← ${SRC_EM_HIS} 失败(${msg}) → ${SRC_TX_IFZQ} 成功(${r.rows.length}条)`)
+      return r
+    } catch (e2) {
+      console.error(`[market] 日K ${who} ← ${SRC_EM_HIS} 失败(${msg}) → ${SRC_TX_IFZQ} 也失败: ${(e2 as Error).message}`)
+      throw e2
+    }
   }
 }
 

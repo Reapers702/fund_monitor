@@ -349,7 +349,7 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: userPrompt }
     ],
-    { temperature: 0.3, maxTokens: 500 }
+    { temperature: 0.3, maxTokens: 2000 } // 思考型模型（如 deepseek-flash）reasoning 也占用该额度，须留足，否则 content 为空
   )
   const parsed = parseAdvice(raw)
   if (!parsed) {

@@ -218,7 +218,7 @@ async function decide(ctx: { pool: Pool; aiFundPool: Pool }, code: string, name:
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: userPrompt }
     ],
-    { temperature: 0.3, maxTokens: 500 }
+    { temperature: 0.3, maxTokens: 2000 } // 思考型模型 reasoning 亦占额度，与 analyze 口径保持一致
   )
   const parsed = parseAdvice(raw)
   if (!parsed) throw new Error(`LLM 解析失败: ${raw.slice(0, 150)}`)

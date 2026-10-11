@@ -88,7 +88,7 @@ export interface EstimateT1Result {
 export async function estimateT1(fundName: string): Promise<EstimateT1Result | null> {
   const idx = findTrackingIndex(fundName)
   if (!idx) return null
-  const q = await quoteBySecid(idx.secid)
+  const q = await quoteBySecid(idx.secid, fundName)
   return { secid: idx.secid, indexName: idx.name, pct: q.pct, ts: new Date(), source: idx.source }
 }
 
@@ -126,7 +126,7 @@ export async function estimateT3(holdings: HoldingWeight[]): Promise<EstimateT3R
   for (const h of valid) {
     totalWeight += h.weight as number
     try {
-      const q = await quoteBySecid(secidOf(h.stockCode as string))
+      const q = await quoteBySecid(secidOf(h.stockCode as string), h.stockName ?? undefined)
       if (q.pct !== null) {
         pctSum += (h.weight as number) * q.pct
         coveredWeight += h.weight as number
@@ -134,8 +134,8 @@ export async function estimateT3(holdings: HoldingWeight[]): Promise<EstimateT3R
       } else {
         details.push({ name: h.stockName ?? h.stockCode as string, weight: h.weight as number, pct: null })
       }
-    } catch (e) {
-      console.warn(`[estimate] T3 ${h.stockCode} 行情失败跳过: ${(e as Error).message}`)
+    } catch {
+      // 失败链路已由 [market] 日志输出（含股票名），这里只标记该股不计入加权
       details.push({ name: h.stockName ?? h.stockCode as string, weight: h.weight as number, pct: null })
     }
   }
