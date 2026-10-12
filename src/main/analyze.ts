@@ -5,6 +5,7 @@ import { configPath, ensureConfigFile, loadConfig } from './config'
 import { createPool, ensureSchema, createAiFundPool } from './storage/db'
 import { analyzeFund, saveAdvice, todayStr } from './analyzer/analyze'
 import { notifyAdvice } from './notifier'
+import { beginTask, failTask, finishTask, taskStep, taskTick } from './tasks'
 import { sleep } from './utils'
 import type { Pool } from 'pg'
 
@@ -93,18 +94,46 @@ export async function runAnalyzeAllCore(pool: Pool, aiFundPool: Pool, skipAnalyz
     for (const row of r.rows) analyzedToday.add(`${row.user_id}|${row.fund_code}`)
   }
 
-  const result: AnalyzeAllResult = { total: 0, done: 0, notified: 0, items: [] }
+  // 待分析清单（先算清总数，再开任务，这样进度条的 N 从一开始就是准的）
+  const targets: { userId: number; code: string; name: string }[] = []
   for (const u of users.rows) {
     for (const f of byUser.get(u.id) ?? []) {
       if (analyzedToday.has(`${u.id}|${f.fund_code}`)) continue
-      result.total++
-      const out = await analyzeOne(pool, aiFundPool, u.id, f.fund_code, f.fund_name, rulesInLLM)
-      if (out.done) result.done++
-      if (out.notified) result.notified++
-      result.items.push({ code: f.fund_code, name: f.fund_name, ...out })
+      targets.push({ userId: u.id, code: f.fund_code, name: f.fund_name })
     }
   }
-  return result
+
+  // 单飞：已有分析任务在跑则抛 TaskBusyError（防重复点击，也防与调度器自动分析撞车）
+  beginTask('analyzeAll', targets.length, 'AI 分析')
+  const result: AnalyzeAllResult = { total: 0, done: 0, notified: 0, items: [] }
+  try {
+    for (const t of targets) {
+      result.total++
+      const out = await analyzeOne(pool, aiFundPool, t.userId, t.code, t.name, rulesInLLM)
+      if (out.done) result.done++
+      if (out.notified) result.notified++
+      result.items.push({ code: t.code, name: t.name, ...out })
+      // 逐基金进度：分析很慢（每次一条大模型调用），没进度用户会以为卡死
+      taskStep(
+        'analyzeAll',
+        `${t.code} ${t.name} ${out.done ? adviceText(out.action) : '分析失败'}${out.confidence !== undefined ? `（置信 ${out.confidence}）` : ''}`
+      )
+      taskTick('analyzeAll', t.name)
+    }
+    finishTask('analyzeAll', `AI 分析完成：${result.done}/${result.total} 只成功，${result.notified} 条通知`)
+    return result
+  } catch (e) {
+    failTask('analyzeAll', (e as Error).message)
+    throw e
+  }
+}
+
+/** 建议动作中文名（进度行用） */
+function adviceText(action?: string): string {
+  if (action === 'add') return '建议加仓'
+  if (action === 'reduce') return '建议减仓'
+  if (action === 'hold') return '建议持有'
+  return '已出建议'
 }
 
 /** 单只基金核心：供 --analyze <code> 使用（默认归 guanxin 用户），返回结构化结果 */

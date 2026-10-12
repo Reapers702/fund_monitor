@@ -12,7 +12,8 @@ import { createPool, ensureSchema } from './storage/db'
 import { saveStockDaily, latestStockDate } from './storage/stockRepo'
 import { saveEstimate } from './storage/estimateRepo'
 import { getMarkers, setMarkers } from './storage/crawlMarker'
-import { clearQuoteCache, prefetchQuotes, secidOf, stockKlines, stockQuote } from './crawler/market'
+import { beginTask, failTask, finishTask, taskPhase, taskStep, taskTick } from './tasks'
+import { prefetchQuotes, secidOf, stockKlines, stockQuote } from './crawler/market'
 import { estimateT1, estimateT3, findTrackingIndex } from './crawler/estimate'
 import { syncFund } from './fund'
 import { latestTradingDayStr } from './scheduler/tradingCalendar'
@@ -85,19 +86,37 @@ export async function runQuotesCore(pool: Pool): Promise<QuotesResult> {
   result.fundCount = funds.length
   if (funds.length === 0) return result
 
+  // 单飞：已在跑则抛 TaskBusyError，调用方（IPC/CLI）据此提示而不是重复抓一遍
+  beginTask('quotes', funds.length, '准备标的')
+
+  try {
+    return await runQuotesBody(pool, funds, result)
+  } catch (e) {
+    failTask('quotes', (e as Error).message)
+    throw e
+  }
+}
+
+/** runQuotesCore 主体（进度埋点已铺开，故单独拆一层，让异常统一落 failTask） */
+async function runQuotesBody(pool: Pool, funds: ActiveFund[], result: QuotesResult): Promise<QuotesResult> {
   const today = todayStr()
-  clearQuoteCache() // 手动刷新/CLI 要的是最新价，清掉上一轮的 TTL 缓存
+  // 注意：这里刻意不再 clearQuoteCache()。批量预热用 force=true 覆盖所需标的，
+  // 而清空整个缓存会顺带干掉"另一个正在跑的任务"刚预热好的数据（调度器估值采样与本流程可能重叠），
+  // 导致对方退化成逐只取价——那正是我们要避免的请求量放大。
 
   // 1. 收集本轮需要的全部标的：持仓股（实时价/日K）+ 估值所需（指数/主题ETF/持仓股）
+  taskPhase('quotes', '收集持仓股', funds.length)
   const allStocks = new Set<string>()
   const stockByFund = new Map<string, string[]>()
   for (const f of funds) {
     const codes = await latestHoldingCodes(pool, f.fund_code)
     stockByFund.set(f.fund_code, codes)
     codes.forEach((c) => allStocks.add(c))
+    taskTick('quotes', f.fund_name)
   }
   result.stockCount = allStocks.size
   const stockList = [...allStocks]
+  taskStep('quotes', `持仓涉及 ${stockList.length} 只股票（${funds.length} 只基金）`)
 
   let estimateSecids: string[] = []
   try {
@@ -130,7 +149,9 @@ export async function runQuotesCore(pool: Pool): Promise<QuotesResult> {
   }
   if (result.klineSkipped > 0)
     logInfo(`[quotes] 跳过 ${result.klineSkipped}/${stockList.length} 只股票的日K补拉（已有最近交易日数据或刚补过）`)
+  taskStep('quotes', `日K 需补拉 ${needKline.length} 只，跳过 ${result.klineSkipped} 只`)
 
+  taskPhase('quotes', '日K补拉', needKline.length)
   const klineFetched: string[] = []
   await mapLimit(needKline, 3, async (code) => {
     try {
@@ -139,17 +160,22 @@ export async function runQuotesCore(pool: Pool): Promise<QuotesResult> {
       klineFetched.push(klineMarker(code))
     } catch (e) {
       result.errors.push({ code, message: `日K: ${(e as Error).message}` })
+    } finally {
+      taskTick('quotes', code)
     }
   })
   if (klineFetched.length > 0) await setMarkers(pool, klineFetched)
 
   // 3. 行情批量预热：一次覆盖全部持仓股 + 指数/主题ETF（随后实时价写库与估值都读这份缓存）
   const allSecids = [...new Set([...stockList.map(secidOf), ...estimateSecids])]
+  taskPhase('quotes', '行情批量预热', allSecids.length)
   await prefetchQuotesSafely(allSecids, `行情批量预热`, true, (msg, e) =>
     result.errors.push({ code: '-', message: `${msg}: ${e}` })
   )
+  taskStep('quotes', `行情批量预热 ${allSecids.length} 只（含指数/ETF）`)
 
   // 4. 当日实时价滚动入库（读第 3 步的缓存，不再逐只请求）
+  taskPhase('quotes', '实时价入库', stockList.length)
   await mapLimit(stockList, 3, async (code) => {
     try {
       const q = await stockQuote(code)
@@ -163,24 +189,37 @@ export async function runQuotesCore(pool: Pool): Promise<QuotesResult> {
       }
     } catch (e) {
       result.errors.push({ code, message: (e as Error).message })
+    } finally {
+      taskTick('quotes', code)
     }
   })
 
   // 5. 盘中估值（T1 跟踪指数 / T2 主题 ETF / T3 重仓股加权）：读第 3 步同一份缓存，只补尚未取到的
+  taskPhase('quotes', '估值采样', funds.length)
   const est = await estimateFunds(pool, funds, false)
   result.estimates = est.estimates
   result.errors.push(...est.errors)
 
   // 6. 净值增量（顺带补齐 T+1 公布的净值；幂等，无新数据则 0 条）。
   //    与 GUI"刷新行情/估值"按钮同链路，保证手动刷新时缺口立即补上（周五净值周六凌晨公布场景）
+  taskPhase('quotes', '净值增量', funds.length)
   for (const f of funds) {
     try {
       await syncFund(pool, f.fund_code, () => {}, { skipDetailIfKnown: true })
+      taskStep('quotes', `净值增量 ${f.fund_code} ${f.fund_name}`)
     } catch (e) {
       result.errors.push({ code: f.fund_code, message: `净值增量: ${(e as Error).message}` })
+    } finally {
+      taskTick('quotes', f.fund_name)
     }
   }
 
+  finishTask(
+    'quotes',
+    `行情刷新完成：${funds.length} 只基金 / ${stockList.length} 只股票，估值 ${result.estimates.length} 条，` +
+      `日K 补 ${result.klineAdded} 行（跳过 ${result.klineSkipped} 只）` +
+      (result.errors.length > 0 ? `，${result.errors.length} 处失败（见「抓取日志」页）` : '')
+  )
   return result
 }
 
@@ -279,13 +318,30 @@ async function estimateFunds(
         source: est.source
       })
       if (saved) estimates.push({ code: f.fund_code, name: est.indexName ?? '', source: est.source, pct: est.estPct })
+      // 逐基金进度（"哪个估值完了"）：仅在 runQuotesCore 开启的任务里登记，调度器采样时无任务是空操作
+      taskStep('quotes', `${f.fund_code} ${f.fund_name} ${estSourceText(est.source)} ${fmtPctText(est.estPct)}`)
     } catch (e) {
       const msg = (e as Error).message
       errors.push({ code: f.fund_code, message: `估值: ${msg}` })
       console.warn(`[quotes] ${f.fund_code} 估值失败: ${msg}`)
+    } finally {
+      taskTick('quotes', f.fund_name)
     }
   }
   return { estimates, errors }
+}
+
+/** 估值来源中文名（进度行用） */
+function estSourceText(source: string): string {
+  if (source === 'tracking_index') return 'T1 跟踪指数'
+  if (source === 'theme_etf') return 'T2 主题ETF'
+  if (source === 'holdings_weighted') return 'T3 重仓股加权'
+  return source
+}
+
+function fmtPctText(v: number | null): string {
+  if (v === null || Number.isNaN(v)) return '--'
+  return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
 }
 
 /** 对单只基金做盘中估值：T1 跟踪指数 → T2 主题 ETF → T3 重仓股加权（主动型兜底）。返回估值结果或 null */

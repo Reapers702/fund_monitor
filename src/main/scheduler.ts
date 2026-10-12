@@ -8,6 +8,7 @@ import { loadConfig } from './config'
 import { createPool, createAiFundPool, ensureSchema } from './storage/db'
 import { sampleEstimatesCore } from './quotes'
 import { runAnalyzeAllCore } from './analyze'
+import { isTaskBusy } from './tasks'
 import { syncFund } from './fund'
 import { latestNavDate } from './storage/fundRepo'
 import { cleanupOldEstimates, recordEstimateDiffs } from './storage/estimateRepo'
@@ -235,7 +236,13 @@ async function tick(): Promise<void> {
             console.log(`[scheduler] ${state.lastLog}`)
             state.adviceTodayDone = true
           } catch (e) {
-            console.error(`[scheduler] AI 分析失败: ${(e as Error).message}`)
+            // 手动"全部 AI 分析"正在跑时不重复分析，也不算失败（单飞由 tasks 层裁定）
+            if (isTaskBusy(e)) {
+              state.lastLog = 'AI 分析已在运行，本轮自动分析跳过'
+              console.warn(`[scheduler] ${state.lastLog}`)
+            } else {
+              console.error(`[scheduler] AI 分析失败: ${(e as Error).message}`)
+            }
           } finally {
             await aiFundPool.end().catch(() => {})
           }

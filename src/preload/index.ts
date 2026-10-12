@@ -40,6 +40,7 @@ const api: FundApi = {
   schedulerStatus: (): Promise<SchedulerStatus> => ipcRenderer.invoke('scheduler:status'),
   alertsRun: (): Promise<AlertRunResult> => ipcRenderer.invoke('alerts:run'),
   crawlStats: (): Promise<CrawlStats> => ipcRenderer.invoke('crawl:stats'),
+  taskStatus: (): Promise<TaskProgress[]> => ipcRenderer.invoke('task:status'),
   logsRecent: (limit?: number): Promise<LogsPayload> => ipcRenderer.invoke('logs:recent', limit ?? 300),
   logsOpenDir: (): Promise<string> => ipcRenderer.invoke('logs:openDir')
 }

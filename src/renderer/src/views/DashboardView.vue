@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { NEmpty, NInput, NButton, NSpace, NCard, NTag, NSwitch, NSpin, NTooltip, NDivider, useMessage } from 'naive-ui'
+import { NEmpty, NInput, NButton, NSpace, NCard, NTag, NSwitch, NSpin, NTooltip, NDivider, NProgress, useMessage } from 'naive-ui'
+import { isRunning, taskOf, taskPercent } from '../taskMonitor'
 
 const router = useRouter()
 const message = useMessage()
@@ -9,10 +10,51 @@ const message = useMessage()
 const funds = ref<FundCard[]>([])
 const loading = ref(true)
 const adding = ref(false)
-const refreshing = ref(false)
-const analyzing = ref(false)
 const newCode = ref('')
 const scheduler = ref<SchedulerStatus | null>(null)
+
+// 刷新/AI 分析的"进行中"状态来自主进程任务登记（tasks.ts），不是本组件的局部 ref——
+// 这样切到别的页面再回来，按钮依然是禁用+进度状态，而不是误以为没在跑而能重复点击
+const quotesTask = taskOf('quotes')
+const analyzeTask = taskOf('analyzeAll')
+const quotesRunning = computed(() => isRunning(quotesTask.value))
+const analyzeRunning = computed(() => isRunning(analyzeTask.value))
+
+/** 面板只展示"本次会话跑过"的任务（idle 占位不显示，否则闲置时也常驻两行"未运行"） */
+const visibleTasks = computed(() =>
+  [quotesTask.value, analyzeTask.value].filter((t): t is TaskProgress => !!t && t.state !== 'idle')
+)
+
+/** 按钮文案：跑起来时直接显示阶段与进度，用户不用去猜"到底在刷什么" */
+function btnText(t: TaskProgress | null, idle: string): string {
+  if (!t || t.state !== 'running') return idle
+  const ph = t.phase ? `${t.phase} ` : ''
+  const cnt = t.total > 0 ? `${t.done}/${t.total}` : ''
+  return `${ph}${cnt}`.trim() || idle
+}
+
+/** 任务完成/失败时提示一次。
+ *  为什么要按 finishedAt 去重：完成通知有两条来源——① 点击后 IPC 返回；② 轮询观察到
+ *  running→done（例如调度器自动跑的 AI 分析，或用户在别的页面时跑完）。两条都可能触发，
+ *  用 finishedAt 作为"这一次运行"的唯一标识，保证只弹一次。
+ *  切页面回来时另有"上次完成"面板兜底，不依赖这里。 */
+const notified = new Set<number>()
+function notifyDone(t: TaskProgress | null, label: string): void {
+  if (!t?.finishedAt || notified.has(t.finishedAt)) return
+  notified.add(t.finishedAt)
+  if (t.state === 'error') message.error(`${label}失败: ${t.error ?? '未知错误'}`)
+  else if (t.state === 'done') message.success(t.summary ?? `${label}完成`)
+}
+watch(quotesTask, (t) => notifyDone(t, '行情刷新'))
+watch(analyzeTask, (t) => notifyDone(t, 'AI 分析'))
+
+/** 进度面板时间格式 */
+function fmtClock(ms: number | null): string {
+  if (!ms) return ''
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
 
 async function load(): Promise<void> {
   loading.value = true
@@ -64,48 +106,36 @@ async function toggle(code: string, active: boolean): Promise<void> {
   }
 }
 
-/** 手动刷新行情+估值（调用主进程 runQuotesCore） */
+/** 手动刷新行情+估值（调用主进程 runQuotesCore）。
+ *  成功/失败的提示交给 task 状态 watch（进度是主进程登记的，跨页面也准）；
+ *  这里只处理"已在运行被拒"这类预期拒绝，以及完成后刷新卡片。 */
 async function refreshQuotes(): Promise<void> {
-  refreshing.value = true
   try {
     const r = await window.api.quotesRun()
-    if (!r.ok || !r.result) {
-      message.error(`行情刷新失败: ${r.error ?? '未知错误'}`)
+    if (!r.ok) {
+      // 重复触发被主进程拒绝：不算错误，也不弹红字（进度条已经在显示那一次）
+      if (!/正在进行中/.test(r.error ?? '')) message.error(`行情刷新失败: ${r.error ?? '未知错误'}`)
       return
     }
-    const est = r.result.estimates
-    message.success(
-      `行情刷新完成：${r.result.fundCount} 只基金 / ${r.result.stockCount} 只股票，估值采样 ${est.length} 条，` +
-        `日K 补 ${r.result.klineAdded} 行（跳过 ${r.result.klineSkipped} 只已有数据）` +
-        (r.result.errors.length ? `，${r.result.errors.length} 处失败（详见「抓取日志」页）` : '')
-    )
     await load() // 刷新卡片（估值/涨跌可能变化）
+    notifyDone(quotesTask.value, '行情刷新')
   } catch (e) {
     message.error(`行情刷新失败: ${(e as Error).message}`)
-  } finally {
-    refreshing.value = false
   }
 }
 
 /** 手动触发全部基金 AI 分析 */
 async function analyzeAll(): Promise<void> {
-  analyzing.value = true
   try {
     const r = await window.api.adviceAnalyzeAll()
-    if (!r.ok || !r.result) {
-      message.error(`AI 分析失败: ${r.error ?? '未知错误'}`)
+    if (!r.ok) {
+      if (!/正在进行中/.test(r.error ?? '')) message.error(`AI 分析失败: ${r.error ?? '未知错误'}`)
       return
     }
-    const res = r.result
-    message.success(
-      `AI 分析完成：${res.done}/${res.total} 只成功，${res.notified} 条通知` +
-        (res.done > 0 ? `，最新建议见基金详情页` : '')
-    )
     await load()
+    notifyDone(analyzeTask.value, 'AI 分析')
   } catch (e) {
     message.error(`AI 分析失败: ${(e as Error).message}`)
-  } finally {
-    analyzing.value = false
   }
 }
 
@@ -179,8 +209,12 @@ onBeforeUnmount(() => {
       />
       <n-button type="primary" :loading="adding" @click="addFund">添加基金</n-button>
       <n-divider vertical />
-      <n-button :loading="refreshing" @click="refreshQuotes">刷新行情/估值</n-button>
-      <n-button :loading="analyzing" @click="analyzeAll">全部 AI 分析</n-button>
+      <n-button :loading="quotesRunning" :disabled="quotesRunning" @click="refreshQuotes">
+        {{ quotesRunning ? btnText(quotesTask, '刷新行情/估值') : '刷新行情/估值' }}
+      </n-button>
+      <n-button :loading="analyzeRunning" :disabled="analyzeRunning" @click="analyzeAll">
+        {{ analyzeRunning ? btnText(analyzeTask, '全部 AI 分析') : '全部 AI 分析' }}
+      </n-button>
       <n-tooltip v-if="scheduler" placement="bottom">
         <template #trigger>
           <span class="sched-badge" :class="scheduler.running ? 'on' : 'off'">
@@ -190,6 +224,40 @@ onBeforeUnmount(() => {
         {{ scheduler.lastLog || '后台任务：盘中估值采样 / 盘后净值增量 / 收盘后 AI 分析' }}
       </n-tooltip>
     </n-space>
+
+    <!-- 任务进度面板：跑起来显示阶段/进度/当前标的/最近完成项；跑完保留"上次完成"，切页面回来也能看到结果 -->
+    <n-card v-if="visibleTasks.length > 0" size="small" class="task-panel">
+      <div v-for="t in visibleTasks" :key="t.kind" class="task-row">
+        <div class="task-head">
+          <n-tag size="tiny" :type="t.state === 'running' ? 'warning' : t.state === 'error' ? 'error' : 'success'" :bordered="false">
+            {{ t.state === 'running' ? '进行中' : t.state === 'error' ? '失败' : '已完成' }}
+          </n-tag>
+          <span class="task-label">{{ t.label }}</span>
+          <span v-if="t.state === 'running'" class="task-phase">
+            {{ t.phase ?? '准备中' }}
+            <template v-if="t.total > 0"> · {{ t.done }}/{{ t.total }}</template>
+            <template v-if="t.current"> · 当前 {{ t.current }}</template>
+          </span>
+          <span v-else-if="t.summary" class="task-phase">{{ t.summary }}</span>
+          <span v-else-if="t.error" class="task-phase err">{{ t.error }}</span>
+          <span class="task-time">
+            {{ t.state === 'running' ? `开始于 ${fmtClock(t.startedAt)}` : t.finishedAt ? `${fmtClock(t.finishedAt)} 结束` : '' }}
+          </span>
+        </div>
+        <n-progress
+          v-if="t.state === 'running'"
+          type="line"
+          :height="6"
+          :percentage="taskPercent(t) ?? 0"
+          :indeterminate="taskPercent(t) === null"
+          :show-indicator="false"
+          processing
+        />
+        <div v-if="t.recent.length > 0" class="task-recent">
+          <div v-for="(line, i) in t.recent.slice(0, 6)" :key="i" class="task-line">{{ line }}</div>
+        </div>
+      </div>
+    </n-card>
 
     <n-spin :show="loading">
       <div v-if="funds.length === 0 && !loading" class="empty-box">
@@ -265,6 +333,59 @@ onBeforeUnmount(() => {
 <style scoped>
 .toolbar {
   margin-bottom: 20px;
+}
+
+/* 任务进度面板 */
+.task-panel {
+  margin-bottom: 16px;
+}
+
+.task-row + .task-row {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--divider-color);
+}
+
+.task-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.task-label {
+  font-weight: 600;
+}
+
+.task-phase {
+  color: var(--text-color-2);
+}
+
+.task-phase.err {
+  color: #e5484d;
+}
+
+.task-time {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-color-3);
+}
+
+.task-recent {
+  margin-top: 6px;
+  max-height: 96px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-color-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .code-input {

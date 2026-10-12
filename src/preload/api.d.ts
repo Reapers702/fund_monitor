@@ -476,6 +476,25 @@ interface LogEntry {
   msg: string
 }
 
+type TaskKind = 'quotes' | 'analyzeAll'
+type TaskState = 'idle' | 'running' | 'done' | 'error'
+
+/** 长任务进度（主进程 tasks.ts 登记；渲染进程轮询展示，切页面不丢） */
+interface TaskProgress {
+  kind: TaskKind
+  label: string
+  state: TaskState
+  startedAt: number
+  finishedAt: number | null
+  phase: string | null // 当前阶段：日K补拉 / 行情批量预热 / 估值采样 / 净值增量 / AI 分析
+  total: number // 当前阶段条目总数
+  done: number // 当前阶段已完成数
+  current: string | null // 正在处理的标的
+  recent: string[] // 最近完成的明细（最新在前）
+  summary: string | null // 完成摘要（切页面回来也能看到刷完了什么）
+  error: string | null
+}
+
 interface LogsPayload {
   entries: LogEntry[]
   dir: string | null // 日志目录（未初始化时 null）
@@ -513,6 +532,7 @@ interface FundApi {
   schedulerStatus: () => Promise<SchedulerStatus>
   alertsRun: () => Promise<AlertRunResult>
   crawlStats: () => Promise<CrawlStats>
+  taskStatus: () => Promise<TaskProgress[]>
   logsRecent: (limit?: number) => Promise<LogsPayload>
   logsOpenDir: () => Promise<string>
 }

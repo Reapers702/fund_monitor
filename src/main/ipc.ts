@@ -35,6 +35,8 @@ import { notifyAdvice } from './notifier'
 import { runQuotesCore } from './quotes'
 import { runAnalyzeAllCore } from './analyze'
 import { getSchedulerState } from './scheduler'
+import { taskProgressList, isTaskBusy } from './tasks'
+import type { TaskProgress } from './tasks'
 import { runAlertCheck } from './alerts/run'
 import { computePosition, listPositions, listTrades, addTrade, deleteTrade, getProfile, saveProfile } from './position/position'
 import type { TradeRow } from './position/position'
@@ -252,7 +254,9 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
       const r = await runQuotesCore(pool)
       return { ok: true, error: null, result: r }
     } catch (e) {
-      console.error('[ipc] quotes:run 失败:', (e as Error).message)
+      // "已在运行"是预期的拒绝（用户重复点击），不当失败刷错误日志
+      if (isTaskBusy(e)) console.warn(`[ipc] quotes:run 忽略重复触发: ${(e as Error).message}`)
+      else console.error('[ipc] quotes:run 失败:', (e as Error).message)
       return { ok: false, error: (e as Error).message, result: null }
     } finally {
       await pool.end().catch(() => {})
@@ -269,7 +273,8 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
       const r = await runAnalyzeAllCore(pool, aiFundPool)
       return { ok: true, error: null, result: r }
     } catch (e) {
-      console.error('[ipc] advice:analyzeAll 失败:', (e as Error).message)
+      if (isTaskBusy(e)) console.warn(`[ipc] advice:analyzeAll 忽略重复触发: ${(e as Error).message}`)
+      else console.error('[ipc] advice:analyzeAll 失败:', (e as Error).message)
       return { ok: false, error: (e as Error).message, result: null }
     } finally {
       await pool.end().catch(() => {})
@@ -453,6 +458,11 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
 
   // 后台调度器状态（设置页展示）
   ipcMain.handle('scheduler:status', (): SchedulerStatus => getSchedulerState())
+
+  // ---------- 长任务进度 ----------
+
+  // 刷新行情/估值、全部 AI 分析的实时进度（首页轮询；切页面/重开页面都不丢，因为登记在主进程）
+  ipcMain.handle('task:status', (): TaskProgress[] => taskProgressList())
 
   // ---------- 抓取日志（P1） ----------
 

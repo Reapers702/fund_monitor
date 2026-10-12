@@ -1,19 +1,34 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { NConfigProvider, NMessageProvider, NLayout, NLayoutHeader, NLayoutContent, NMenu, NTag, NAvatar, zhCN, dateZhCN, darkTheme } from 'naive-ui'
+import { NConfigProvider, NMessageProvider, NLayout, NLayoutHeader, NLayoutContent, NMenu, NTag, NAvatar, NSpin, zhCN, dateZhCN, darkTheme } from 'naive-ui'
+import { runningTasks, startTaskMonitor } from './taskMonitor'
 
 const route = useRoute()
 const dark = ref(false)
 const currentUser = ref<CurrentUser | null>(null)
+const busy = runningTasks()
 
 onMounted(async () => {
+  // 长任务进度是全局的：在任意页面都能看到"刷新行情/估值""全部 AI 分析"跑到哪了
+  startTaskMonitor()
   try {
     currentUser.value = await window.api.userGetCurrent()
   } catch {
     // 启动建表未完成时忽略，稍后页面刷新会带上
   }
 })
+
+/** 顶栏任务描述：阶段 + i/N（+"正在处理 xx"），让用户切到任何页面都知道后台在干什么 */
+function busyText(): string {
+  return busy.value
+    .map((t) => {
+      const pct = t.total > 0 ? ` ${t.done}/${t.total}` : ''
+      const ph = t.phase ? ` · ${t.phase}` : ''
+      return `${t.label}${ph}${pct}`
+    })
+    .join('　')
+}
 
 const activeKey = computed(() => {
   if (route.path.startsWith('/fund')) return 'dashboard'
@@ -59,6 +74,10 @@ function onMenuSelect(key: string): void {
             :value="activeKey"
             @update:value="onMenuSelect"
           />
+          <n-tag v-if="busy.length > 0" class="busy-tag" size="small" type="warning" :bordered="false">
+            <n-spin :size="12" />
+            <span class="busy-text">{{ busyText() }}</span>
+          </n-tag>
           <n-tag v-if="currentUser" class="user-tag" size="small" :bordered="false">
             <n-avatar round :size="18" class="user-avatar">{{ currentUser.name.slice(0, 1) }}</n-avatar>
             {{ currentUser.name }}
@@ -114,6 +133,20 @@ function onMenuSelect(key: string): void {
 .user-tag {
   margin-left: 12px;
   color: var(--text-color-2);
+}
+
+.busy-tag {
+  margin-left: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 46vw;
+}
+
+.busy-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .user-avatar {

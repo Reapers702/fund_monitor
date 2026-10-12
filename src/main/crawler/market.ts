@@ -74,7 +74,8 @@ const QUOTE_TTL_MS = 60_000
  *  需要最新价的操作请用 prefetchQuotes({ force: true }) 并紧邻消费。 */
 const quoteCache = new Map<string, { q: StockQuote | null; ts: number }>()
 
-/** 清空行情缓存（手动刷新时调用，确保拿到最新价而非缓存） */
+/** 重置行情缓存。生产链路不需要调用它——新鲜度由 TTL 与 prefetchQuotes({force:true}) 控制，
+ *  且清空会误伤并发任务的预热结果；这里主要供单测做用例间隔离。 */
 export function clearQuoteCache(): void {
   quoteCache.clear()
 }
