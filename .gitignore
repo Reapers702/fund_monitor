@@ -10,6 +10,7 @@ out
 .env
 .env.local
 
-# 开发调试产物（截图/抓取缓存/临时编译）
+# 开发调试产物（截图/抓取缓存/临时编译/IDE 目录）
 .shots/
 .zcode/
+.trae/

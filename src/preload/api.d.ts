@@ -256,6 +256,7 @@ interface QuotesRunResult {
     fundCount: number
     stockCount: number
     klineAdded: number
+    klineSkipped: number // 本地已有最近交易日日K、跳过补拉的股票数（P0 降请求量）
     estimates: { code: string; name: string; source: string; pct: number | null }[]
     errors: { code: string; message: string }[]
   } | null
@@ -424,6 +425,63 @@ interface CurrentUser {
   name: string
 }
 
+// ---------- 抓取日志（P1：crawl:stats / logs:recent 返回） ----------
+
+/** 单次抓取请求记录（主进程 crawler/requestLog.ts） */
+interface CrawlRequestRecord {
+  ts: number // 开始时刻（ms）
+  host: string
+  path: string
+  tag: string // 业务标签（中文），如「净值:东财lsjz」
+  status: number | null // 连接级失败为 null
+  ms: number
+  bytes: number
+  attempt: number // 第几次尝试，1 = 首次
+  ok: boolean
+  error: string | null
+}
+
+/** 单一维度（业务标签 / 主机）的累计统计 */
+interface CrawlDimensionStat {
+  key: string
+  total: number
+  ok: number
+  fail: number
+  avgMs: number
+  lastTs: number
+  lastError: string | null
+}
+
+/** 抓取统计（本次运行累计；重启清零，避免把历史累计误当本次） */
+interface CrawlStats {
+  since: number
+  total: number
+  ok: number
+  fail: number
+  byTag: CrawlDimensionStat[]
+  byHost: CrawlDimensionStat[]
+  recent: CrawlRequestRecord[]
+  failures: CrawlRequestRecord[]
+  limiter: { active: number; queued: number; maxConcurrent: number; minGapMs: number }
+  channel: 'node' | 'browser' | 'auto' // 当前抓取通道（config.fetch.channel，实时生效）
+  push2: { blocked: boolean; until: number | null; source: string } // 主行情源是否熔断（被风控）
+  benchmark: { cached: boolean; cachedAt: number | null; backoffUntil: number | null }
+  calendar: { tencentBackoffUntil: number | null; cachedDays: number }
+}
+
+/** 应用日志行（logger.ts 内存环形缓冲；与日志文件同源） */
+interface LogEntry {
+  ts: number
+  level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
+  msg: string
+}
+
+interface LogsPayload {
+  entries: LogEntry[]
+  dir: string | null // 日志目录（未初始化时 null）
+  file: string | null // 今日日志文件
+}
+
 // 渲染进程可用的业务 API（与 src/main/ipc.ts 的 handler 一一对应）
 interface FundApi {
   ping: () => Promise<string>
@@ -454,4 +512,7 @@ interface FundApi {
   configSave: (patch: Record<string, unknown>) => Promise<AppConfig>
   schedulerStatus: () => Promise<SchedulerStatus>
   alertsRun: () => Promise<AlertRunResult>
+  crawlStats: () => Promise<CrawlStats>
+  logsRecent: (limit?: number) => Promise<LogsPayload>
+  logsOpenDir: () => Promise<string>
 }

@@ -62,6 +62,17 @@ export const SCHEMA_STATEMENTS: string[] = [
       CONSTRAINT uq_hold UNIQUE (fund_code, report_date, rank)
   )`,
 
+  // 通用"抓取标记"：记录某个抓取动作上次发生的时间，用于按周期节流低频但需要定期刷新的数据。
+  // 为什么要在 fund_holdings 之外单独记：
+  //   - 报告期（季末日期）不是抓取时间，不能用来判断"该不该重抓"（报告期可能已过数月）；
+  //   - 某些标的解析结果可能为 0 行（如纯债基没有股票持仓表），没有行可以顺带更新时间戳，
+  //     若只看 fund_holdings 是否存在就会每轮都重抓、白白增加请求。
+  // 键约定：'holdings:<基金代码>'（持仓刷新周期，见 fetcher.holdingsRefreshDays）。
+  `CREATE TABLE IF NOT EXISTS crawl_marker (
+      marker     TEXT        PRIMARY KEY,
+      at         TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`,
+
   `CREATE TABLE IF NOT EXISTS stock_daily (
       id          BIGSERIAL PRIMARY KEY,
       stock_code  VARCHAR(16) NOT NULL,

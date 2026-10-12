@@ -43,6 +43,17 @@ export function fundBasicFromDetail(d: FundDetail): FundBasicInput {
 
 // ---------- fund_nav_daily ----------
 
+/** 库里已有的基金名称（fund_basic 有记录返回名称，否则 null）。
+ *  用途：例行净值轮询时跳过"基金详情"抓取——详情字段（经理/托管/成立日）不会每天变，
+ *  没必要每轮都向蛋卷发一次请求（P0 降请求量） */
+export async function fundBasicName(pool: Pool, code: string): Promise<string | null> {
+  const r = await pool.query<{ fund_name: string | null }>(
+    `SELECT fund_name FROM fund_basic WHERE fund_code = $1`,
+    [code]
+  )
+  return r.rows[0]?.fund_name ?? null
+}
+
 /** 最新净值日期；无数据返回 null */
 export async function latestNavDate(pool: Pool, code: string): Promise<string | null> {
   const r = await pool.query<{ d: string | null }>(

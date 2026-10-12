@@ -77,7 +77,8 @@ function intersectionSize(a: Set<string>, b: Set<string>): number {
 export async function fetchIndexValuations(): Promise<IndexValuation[]> {
   const d = await httpGetJson<{ data: { items: DanjuanItem[] } }>(DANJUAN_URL, {
     referer: DANJUAN_REFERER,
-    retries: 2
+    retries: 2,
+    tag: '估值:蛋卷快照'
   })
   return (d.data?.items ?? []).map((it) => ({
     indexCode: it.index_code,

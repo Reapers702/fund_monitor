@@ -1,8 +1,15 @@
-import { ipcMain, app } from 'electron'
+import { ipcMain, app, shell } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { loadConfig, saveConfig } from './config'
 import { createPool, createAiFundPool, ensureSchema } from './storage/db'
 import { recentNews } from './news/reader'
+import { recentLogs, getLogDir, getLogFilePath } from './logger'
+import { requestStats } from './crawler/requestLog'
+import { limiterState } from './crawler/httpClient'
+import { getFetchChannel } from './crawler/channel'
+import { push2Status } from './crawler/market'
+import { benchmarkStatus } from './crawler/benchmark'
+import { calendarStatus } from './scheduler/tradingCalendar'
 import {
   listFunds,
   navSeries,
@@ -446,6 +453,44 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
 
   // 后台调度器状态（设置页展示）
   ipcMain.handle('scheduler:status', (): SchedulerStatus => getSchedulerState())
+
+  // ---------- 抓取日志（P1） ----------
+
+  // 抓取请求统计（「抓取日志」页：按业务标签/主机聚合 + 最近请求 + 最近失败 + 数据源状态）
+  ipcMain.handle('crawl:stats', (): CrawlStats => {
+    const stats = requestStats()
+    const limiter = limiterState()
+    return {
+      since: stats.since,
+      total: stats.total,
+      ok: stats.ok,
+      fail: stats.fail,
+      byTag: stats.byTag.map((d) => ({ ...d })),
+      byHost: stats.byHost.map((d) => ({ ...d })),
+      recent: stats.recent,
+      failures: stats.failures,
+      limiter: { active: limiter.active, queued: limiter.queued, maxConcurrent: limiter.maxConcurrent, minGapMs: limiter.minGapMs },
+      channel: getFetchChannel(),
+      push2: push2Status(),
+      benchmark: benchmarkStatus(),
+      calendar: calendarStatus()
+    }
+  })
+
+  // 最近应用日志（含抓取失败详情；与文件日志同源，免去翻文件）
+  ipcMain.handle('logs:recent', (_e, limit = 300): LogsPayload => ({
+    entries: recentLogs(limit),
+    dir: getLogDir(),
+    file: getLogFilePath()
+  }))
+
+  // 打开日志目录（资源管理器/Finder），便于查看历史日志文件
+  ipcMain.handle('logs:openDir', async (): Promise<string> => {
+    const dir = getLogDir()
+    if (!dir) return '日志目录尚未初始化'
+    const err = await shell.openPath(dir)
+    return err // 空字符串 = 成功
+  })
 
   ipcMain.handle('config:get', (): AppConfig => {
     return loadConfig()

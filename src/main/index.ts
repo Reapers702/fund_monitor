@@ -12,6 +12,7 @@ import { runAnalyzeAll, runAnalyzeOne } from './analyze'
 import { runBacktest } from './backtest'
 import { startScheduler, stopScheduler } from './scheduler'
 import { initLogger, logInfo, logWarn } from './logger'
+import { destroyBrowserChannel } from './crawler/pageFetcher'
 import { initUser, ensureDefaultUser } from './user'
 import { loadConfig } from './config'
 import { createPool, ensureSchema } from './storage/db'
@@ -195,8 +196,9 @@ if (process.argv.includes('--check')) {
     // Set app user model id for windows
     electronApp.setAppUserModelId('top.reapers.fundmonitor')
 
-    // 文件日志（userData/logs，按日滚动）
-    initLogger()
+    // 文件日志（userData/logs，按日滚动）。传入目录而非让 logger 依赖 electron，
+    // 使 httpClient 等抓取层模块也能安全记录日志（单测 import 时不会拉起 electron）
+    initLogger(app.getPath('userData'))
     logInfo(`应用启动（版本 ${app.getVersion()}）`)
     // 恢复上次使用的用户（多用户 M9）
     initUser()
@@ -259,6 +261,8 @@ if (process.argv.includes('--check')) {
     }
     app.on('before-quit', () => {
       isQuitting = true
+      // 关掉浏览器通道的隐藏窗口：它上面可能还有未完成的页面加载，会拖慢退出
+      destroyBrowserChannel()
     })
 
     // 后台调度器：盘中估值采样 / 盘后净值增量 / 收盘后 AI 分析（托盘常驻时也持续运行）

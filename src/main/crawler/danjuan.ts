@@ -24,7 +24,7 @@ interface DanjuanResp {
 
 export async function danjuanFundDetail(code: string): Promise<FundDetail> {
   const url = `https://danjuanfunds.com/djapi/fund/${code}`
-  const resp = await httpGetJson<DanjuanResp>(url, { referer: 'https://danjuanfunds.com/', retries: 2 })
+  const resp = await httpGetJson<DanjuanResp>(url, { referer: 'https://danjuanfunds.com/', retries: 2, tag: '详情:蛋卷' })
   const d = resp.data
   if (!d?.fd_name) throw new Error('蛋卷未返回基金详情')
   return {

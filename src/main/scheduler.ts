@@ -15,7 +15,7 @@ import { runAlertCheck, cleanupAlertLog } from './alerts/run'
 import { todayStr } from './quotes'
 import { isIntraday, isAfterClose, nowMinutes } from './scheduler/time'
 import { isTradingDay as isTradingDayCal, latestTradingDayStr } from './scheduler/tradingCalendar'
-import { logInfo, logWarn, logError } from './logger'
+import { logInfo, logWarn } from './logger'
 import type { Pool } from 'pg'
 
 const TICK_MS = 30_000 // 每 30s 检查一次时段状态
@@ -35,6 +35,11 @@ let timer: NodeJS.Timeout | null = null
 let adviceCheckedDate: string | null = null
 // 本会话已确认"今日估算值快照是否已入库"的日期（跨天感知）
 let valuationCheckedDate: string | null = null
+// 本会话已做"今日净值轮询"的日期（跨天感知）。navTodayDone 仅在内存里，托盘常驻跨天后必须复位，
+// 否则第二天起永远不再轮询净值（原实现的内存标记不复位 bug）
+let navCheckedDate: string | null = null
+// 上一次净值轮询的时刻：真正按 cfg.fetcher.navCheckMinutes 节流（原实现每 30s 一轮）
+let lastNavRunAt = 0
 
 /** 是否已确认目标交易日净值（所有用户自选基金并集都出净值才算，多用户 M9）。
  *  交易日目标=today；非交易日目标=最近交易日（周五净值周六凌晨公布是常态，周六盘后也要补） */
@@ -52,7 +57,8 @@ async function navTodayConfirmed(pool: Pool, targetDate: string): Promise<boolea
   return true
 }
 
-/** 净值增量：对全局活跃基金（所有用户自选并集，去重）串行 syncFund（详情+净值增量+持仓缺失补拉） */
+/** 净值增量：对全局活跃基金（所有用户自选并集，去重）串行 syncFund（净值增量 + 持仓缺失补拉；
+ *  详情跳过——例行轮询不必每轮都拉基金详情，省请求量） */
 async function runNavDaily(pool: Pool): Promise<{ done: number; total: number }> {
   const funds = await pool.query<{ fund_code: string }>(
     `SELECT DISTINCT f.fund_code
@@ -63,7 +69,7 @@ async function runNavDaily(pool: Pool): Promise<{ done: number; total: number }>
   let done = 0
   for (const f of funds.rows) {
     try {
-      await syncFund(pool, f.fund_code, (s) => console.log(`[scheduler] ${s}`))
+      await syncFund(pool, f.fund_code, (s) => console.log(`[scheduler] ${s}`), { skipDetailIfKnown: true })
       done++
     } catch (e) {
       console.error(`[scheduler] ${f.fund_code} 净值增量失败: ${(e as Error).message}`)
@@ -100,7 +106,6 @@ async function tick(): Promise<void> {
           state.valuationTodayDone = stored > 0
           state.lastLog = `指数估值快照 ${stored} 个板块（${today}）`
           console.log(`[scheduler] ${state.lastLog}`)
-          logInfo(`[scheduler] ${state.lastLog}`)
         } catch (e) {
           logWarn(`[scheduler] 指数估值快照失败: ${(e as Error).message}`)
         }
@@ -116,7 +121,6 @@ async function tick(): Promise<void> {
         state.lastLog = `估值采样 ${r.sampled} 条（${new Date().toLocaleTimeString('zh-CN', { hour12: false })}）`
         if (r.sampled > 0) {
           console.log(`[scheduler] ${state.lastLog}`)
-          logInfo(`[scheduler] ${state.lastLog}`)
         }
         if (r.errors > 0) logWarn(`[scheduler] 估值采样失败 ${r.errors} 条`)
         // 采样后立刻检查估值类提醒（阈值/盘中止盈止损）：估算大幅异动时当天只推一次
@@ -135,18 +139,41 @@ async function tick(): Promise<void> {
     }
 
     // 2. 盘后净值增量（15:30 起，每 navCheckMinutes 轮询直至目标交易日净值出现；非交易日补最近交易日）
+    //    P0 修复：原实现每个 tick（30s）都把所有基金全量重跑一遍 syncFund，而 navCheckMinutes 配置项
+    //    从未被读取——净值通常在 20:00~23:00 公布，30 秒一轮等于对同一批基金打几千次无用请求，
+    //    是触发 IP 风控的主要来源。现在改为：真正按 navCheckMinutes 节流 + 轮询前先查库判是否已最新。
     if (isAfterClose(m)) {
+      const navDate = todayStr()
+      if (navCheckedDate !== navDate) {
+        navCheckedDate = navDate // 跨天复位：新的一天重新开始轮询
+        state.navTodayDone = false
+        lastNavRunAt = 0
+      }
       if (!state.navTodayDone) {
-        if (m <= 23 * 60) {
-          const target = trading ? todayStr() : latestTradingDayStr()
-          const r = await runNavDaily(pool)
-          const confirmed = await navTodayConfirmed(pool, target)
-          state.lastLog = `净值增量 ${r.done}/${r.total}${confirmed ? `（${target} 净值已确认）` : '（等待公布，稍后重试）'}`
-          console.log(`[scheduler] ${state.lastLog}`)
-          logInfo(`[scheduler] ${state.lastLog}`)
-          if (confirmed || m >= 22 * 60) state.navTodayDone = true
+        const intervalMs = Math.max(1, Number(cfg.fetcher.navCheckMinutes) || 10) * 60_000
+        const due = Date.now() - lastNavRunAt >= intervalMs
+        if (m > 23 * 60) {
+          state.navTodayDone = true // 23:00 后放弃当日轮询（等次日/new 会话重新开始）
+        } else if (due) {
+          lastNavRunAt = Date.now()
+          const target = trading ? navDate : latestTradingDayStr()
+          // 先查库判断是否已拿到：上个会话/重启前可能已经拉过，避免重复请求
+          const already = await navTodayConfirmed(pool, target)
+          if (already) {
+            state.navTodayDone = true
+            state.lastLog = `${target} 净值已是最新，跳过本轮轮询`
+            console.log(`[scheduler] ${state.lastLog}`)
+          } else {
+            const r = await runNavDaily(pool)
+            const confirmed = await navTodayConfirmed(pool, target)
+            state.lastLog = `净值增量 ${r.done}/${r.total}${
+              confirmed ? `（${target} 净值已确认）` : `（等待公布，${Math.round(intervalMs / 60_000)} 分钟后重试）`
+            }`
+            console.log(`[scheduler] ${state.lastLog}`)
+            if (confirmed || m >= 22 * 60) state.navTodayDone = true
+          }
           // 净值确认后：记录"盘中估值 vs 实际净值"误差（T3 可信度验证），并清理过期估值（保留最近 30 天）
-          if (confirmed) {
+          if (state.navTodayDone) {
             try {
               const diffRows = await recordEstimateDiffs(pool, target)
               if (diffRows > 0) logInfo(`[scheduler] 记录估值误差 ${diffRows} 条（${target}）`)
@@ -181,8 +208,6 @@ async function tick(): Promise<void> {
               logWarn(`[scheduler] 提醒记录清理失败: ${(e as Error).message}`)
             }
           }
-        } else {
-          state.navTodayDone = true
         }
       }
 
@@ -200,7 +225,6 @@ async function tick(): Promise<void> {
           if (state.adviceTodayDone) {
             state.lastLog = `AI 分析今日已完成（${today}），跳过自动分析`
             console.log(`[scheduler] ${state.lastLog}`)
-            logInfo(`[scheduler] ${state.lastLog}`)
           }
         }
         if (!state.adviceTodayDone) {
@@ -209,11 +233,9 @@ async function tick(): Promise<void> {
             const r = await runAnalyzeAllCore(pool, aiFundPool, true) // 逐基金跳过今日已分析
             state.lastLog = `AI 分析 ${r.done}/${r.total}（通知 ${r.notified}）`
             console.log(`[scheduler] ${state.lastLog}`)
-            logInfo(`[scheduler] ${state.lastLog}`)
             state.adviceTodayDone = true
           } catch (e) {
             console.error(`[scheduler] AI 分析失败: ${(e as Error).message}`)
-            logError(`[scheduler] AI 分析失败: ${(e as Error).message}`)
           } finally {
             await aiFundPool.end().catch(() => {})
           }
@@ -229,7 +251,6 @@ async function tick(): Promise<void> {
     }
   } catch (e) {
     console.error(`[scheduler] tick 异常: ${(e as Error).message}`)
-    logError(`[scheduler] tick 异常: ${(e as Error).message}`)
   } finally {
     await pool.end().catch(() => {})
   }
@@ -238,8 +259,7 @@ async function tick(): Promise<void> {
 /** 启动调度器（主窗口 ready 后调用；幂等，重复调用返回 false） */
 export function startScheduler(): boolean {
   if (timer) return false
-  console.log(`[scheduler] 启动（tick ${TICK_MS / 1000}s）`)
-  logInfo(`[scheduler] 启动（tick ${TICK_MS / 1000}s）`)
+  console.log(`[scheduler] 启动（tick ${TICK_MS / 1000}s，净值轮询间隔见设置页）`)
   state.running = true
   state.lastEstimateAt = 0
   state.navTodayDone = false

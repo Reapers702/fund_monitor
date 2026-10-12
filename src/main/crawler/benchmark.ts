@@ -46,3 +46,8 @@ export function clearBenchmarkCache(): void {
   cache = null
   failUntil = 0
 }
+
+/** 基准数据源状态（GUI 抓取日志页展示缓存/退避情况） */
+export function benchmarkStatus(): { cached: boolean; cachedAt: number | null; backoffUntil: number | null } {
+  return { cached: cache !== null, cachedAt: cache?.ts ?? null, backoffUntil: failUntil || null }
+}

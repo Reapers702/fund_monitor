@@ -60,7 +60,12 @@ interface TencentKlineResp {
 async function fetchTradingDays(): Promise<string[] | null> {
   const url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh${BENCH_STOCK},day,,,${FETCH_LIMIT},qfq`
   try {
-    const d = await httpGetJson<TencentKlineResp>(url, { referer: 'https://gu.qq.com/', retries: 1, timeoutMs: 10000 })
+    const d = await httpGetJson<TencentKlineResp>(url, {
+      referer: 'https://gu.qq.com/',
+      retries: 1,
+      timeoutMs: 10000,
+      tag: '日历:腾讯ifzq'
+    })
     const arr = d.data?.[`sh${BENCH_STOCK}`]?.qfqday ?? d.data?.[`sh${BENCH_STOCK}`]?.day ?? []
     const days = arr.map((c) => c[0]).filter((x): x is string => Boolean(x) && /^\d{4}-\d{2}-\d{2}$/.test(x))
     return days.length > 0 ? days : null
@@ -85,13 +90,18 @@ async function getTradingDaySet(): Promise<Set<string> | null> {
   return cachedDays
 }
 
+/** 交易日历数据源状态（GUI 抓取日志页展示降级情况） */
+export function calendarStatus(): { tencentBackoffUntil: number | null; cachedDays: number } {
+  return { tencentBackoffUntil: tencentFailedUntil || null, cachedDays: cachedDays?.size ?? 0 }
+}
+
 /** 拉取百度某年法定节假日（holidayList + 补班日 workDay）；失败返回 null */
 async function fetchBaiduHolidays(year: number): Promise<{ holidayDays: Set<string>; workDays: Set<string> } | null> {
   const url =
     `https://opendata.baidu.com/data/inner?tn=reserved_all_res_tn&format=json&resource_id=52109` +
     `&query=${encodeURIComponent('法定节假日')}&year=${year}&apiType=holidayData&cb=jsonp_holiday`
   try {
-    const text = await httpGetText(url, { referer: 'https://www.baidu.com/', retries: 1, timeoutMs: 10000 })
+    const text = await httpGetText(url, { referer: 'https://www.baidu.com/', retries: 1, timeoutMs: 10000, tag: '日历:百度节假日' })
     const m = text.match(/^[^(]*\((.*)\)\s*;?\s*$/s)
     if (!m) return null
     const data = JSON.parse(m[1]) as {

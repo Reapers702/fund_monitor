@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
+import { setFetchChannel } from './crawler/channel'
 
 // 配置结构（与计划书 §7.5 一致）
 export interface PgConfig {
@@ -208,6 +209,7 @@ export function ensureConfigFile(): AppConfig {
     applyEnvOverrides(cfg, loadDotEnvOverrides())
     writeFileSync(path, JSON.stringify(cfg, null, 2), 'utf8')
     console.log(`[config] 已生成模板: ${path}`)
+    setFetchChannel(cfg.fetch.channel)
     return cfg
   }
   return loadConfig()
@@ -223,9 +225,13 @@ export function loadConfig(): AppConfig {
     // .env 开发回退：config.json 中为空的字段用 .env 补全（显式配置优先）
     applyEnvOverrides(cfg, loadDotEnvOverrides(), { fillOnlyEmpty: true })
     resolveAiFund(cfg) // applyEnvOverrides 可能填了 aiFund 字段，再补一次继承
+    // 注入抓取通道（httpClient 不依赖 electron，故由这里把配置值推进 channel.ts 的纯状态）。
+    // loadConfig() 被调度器每轮调用，因此设置页改动即时生效，无需重启。
+    setFetchChannel(cfg.fetch.channel)
     return cfg
   } catch (e) {
     console.error(`[config] 读取失败 ${path}，回退默认配置:`, (e as Error).message)
+    setFetchChannel('node')
     return structuredClone(DEFAULTS)
   }
 }
@@ -234,4 +240,5 @@ export function saveConfig(cfg: AppConfig): void {
   const path = configPath()
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, JSON.stringify(cfg, null, 2), 'utf8')
+  setFetchChannel(cfg.fetch.channel) // 保存后立刻生效（不必等下一次轮询）
 }

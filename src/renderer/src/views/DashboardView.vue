@@ -75,8 +75,9 @@ async function refreshQuotes(): Promise<void> {
     }
     const est = r.result.estimates
     message.success(
-      `行情刷新完成：${r.result.fundCount} 只基金 / ${r.result.stockCount} 只股票，估值采样 ${est.length} 条` +
-        (r.result.errors.length ? `，${r.result.errors.length} 处失败（见主进程日志）` : '')
+      `行情刷新完成：${r.result.fundCount} 只基金 / ${r.result.stockCount} 只股票，估值采样 ${est.length} 条，` +
+        `日K 补 ${r.result.klineAdded} 行（跳过 ${r.result.klineSkipped} 只已有数据）` +
+        (r.result.errors.length ? `，${r.result.errors.length} 处失败（详见「抓取日志」页）` : '')
     )
     await load() // 刷新卡片（估值/涨跌可能变化）
   } catch (e) {

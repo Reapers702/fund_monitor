@@ -2,6 +2,16 @@
 import type { Pool } from 'pg'
 import type { KlineRow } from '../crawler/market'
 
+/** 本地已有该股最新日线日期（YYYY-MM-DD）；无数据返回 null。
+ *  用途：日 K 补种前判断是否已有最近交易日数据，避免每次刷新都重拉全部历史（P0 降请求量） */
+export async function latestStockDate(pool: Pool, code: string): Promise<string | null> {
+  const r = await pool.query<{ d: string | null }>(
+    `SELECT to_char(max(trade_date), 'YYYY-MM-DD') AS d FROM stock_daily WHERE stock_code = $1`,
+    [code]
+  )
+  return r.rows[0]?.d ?? null
+}
+
 /** 幂等入库日 K（含当日盘中最新价时，DO UPDATE 滚动更新当日行） */
 export async function saveStockDaily(
   pool: Pool,

@@ -267,6 +267,10 @@ async function runAlerts(): Promise<void> {
                 { label: '自动（失败切换）', value: 'auto' }
               ]"
             />
+            <span class="setting-hint">
+              决定请求由谁发出：浏览器通道用真实 Chromium 发同源请求（带 Cookie、可执行站点脚本），能绕过指纹/签名类反爬；
+              但不改变请求数量和来源 IP——风控的主因是频率，降频措施已默认生效（批量取价 + 缓存 + 限流），可在「抓取日志」页查看实际请求量。
+            </span>
           </n-form-item>
           <n-form-item label="开机自启">
             <n-space align="center" :size="10">

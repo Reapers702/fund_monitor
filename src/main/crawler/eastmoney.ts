@@ -40,7 +40,7 @@ export async function lsjzNav(
 
   for (let pageIndex = 1; pageIndex <= maxPages; pageIndex++) {
     const url = `https://api.fund.eastmoney.com/f10/lsjz?fundCode=${code}&pageIndex=${pageIndex}&pageSize=${pageSize}`
-    const resp = await httpGetJson<LsjzResp>(url, { referer: EASTMONEY_REFERER })
+    const resp = await httpGetJson<LsjzResp>(url, { referer: EASTMONEY_REFERER, tag: '净值:东财lsjz' })
     if (resp.ErrCode !== 0 && resp.ErrCode !== undefined) {
       throw new Error(`lsjz 业务错误码 ${resp.ErrCode}`)
     }
@@ -78,7 +78,7 @@ export interface PingzhongData {
 /** 一次性拉全量净值（正则提取 JS 变量；data 量大，仅首启/手动刷新用） */
 export async function pingzhongdata(code: string): Promise<PingzhongData> {
   const url = `https://fund.eastmoney.com/pingzhongdata/${code}.js`
-  const text = await httpGetText(url, { referer: EASTMONEY_REFERER, timeoutMs: 30000, retries: 3 })
+  const text = await httpGetText(url, { referer: EASTMONEY_REFERER, timeoutMs: 30000, retries: 3, tag: '净值:东财pingzhongdata' })
 
   const name = /var fS_name = "([^"]*)"/.exec(text)?.[1] ?? ''
   const codeRaw = /var fS_code = "([^"]*)"/.exec(text)?.[1] ?? code
@@ -118,7 +118,7 @@ export interface HoldingsReport {
 /** 解析 apidata JS 内容：按 h4「截止至」日期与表格配对，表头按列名映射（兼容季度表结构差异） */
 export async function jjccHoldings(code: string): Promise<HoldingsReport[]> {
   const url = `http://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=${code}&topline=10`
-  const text = await httpGetText(url, { referer: F10_REFERER })
+  const text = await httpGetText(url, { referer: F10_REFERER, tag: '持仓:东财jjcc' })
   // content 是 JS 字符串字面量，以 "…",arryear:[…] 结尾；捕获到闭合引号为止（兼容内部 \" 转义）
   const content = /var apidata=\s*\{\s*content:\s*"((?:[^"\\]|\\.)*)"/s.exec(text)?.[1]?.replace(/\\(.)/g, '$1')
   if (!content) throw new Error('jjcc 未取到 content')
