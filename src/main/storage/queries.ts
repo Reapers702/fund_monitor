@@ -3,6 +3,7 @@
 import type { Pool } from 'pg'
 import type { PortfolioHolding } from '../portfolio/portfolio'
 import type { NavLike } from '../analyzer/metrics'
+import { latestTradingDayStr } from '../scheduler/tradingCalendar'
 
 /**
  * pg DATE 列（node-postgres 解析为本地时区 00:00 的 Date）转 YYYY-MM-DD。
@@ -23,6 +24,7 @@ export interface FundCard {
   latestNavDate: string | null
   navChangePct: number | null // 当日涨跌（净值数据自带 jzzzl）
   navFetchedAt: string | null // 最新净值入库（抓取）时间，ISO
+  navPending: boolean // 最近交易日的净值还没公布（净值 T+1 公布：当天盘中看到的必然是上一交易日的净值）
   estPct: number | null // 盘中估值（最新一次采样）
   estTime: string | null
   estSource: string | null // tracking_index / theme_etf
@@ -75,20 +77,26 @@ export async function listFunds(pool: Pool, userId: number): Promise<FundCard[]>
     e.fund_code,
     { estPct: e.est_pct === null ? null : Number(e.est_pct), estTime: e.est_time.toISOString(), estSource: e.source }
   ]))
-  return r.rows.map((row) => ({
-    code: row.fund_code,
-    name: row.fund_name,
-    isActive: row.is_active,
-    latestNav: row.dwjz === null ? null : Number(row.dwjz).toFixed(4),
-    latestNavDate: row.trade_date ? dateOnly(row.trade_date) : null,
-    navChangePct: row.jzzzl === null ? null : Number(row.jzzzl),
-    navFetchedAt: row.created_at ? row.created_at.toISOString() : null,
-    ...(estMap.get(row.fund_code) ?? { estPct: null, estTime: null, estSource: null }),
-    holdingsDate: row.holdings_date,
-    adviceAction: row.advice_action,
-    adviceConfidence: row.advice_confidence === null ? null : Number(row.advice_confidence),
-    adviceDate: row.advice_date
-  }))
+  // 净值 T+1 公布：库里最新净值日期 < 最近交易日 = 这一交易日的净值还没出（用静态表判断，无网络开销）
+  const navTarget = latestTradingDayStr()
+  return r.rows.map((row) => {
+    const navDate = row.trade_date ? dateOnly(row.trade_date) : null
+    return {
+      code: row.fund_code,
+      name: row.fund_name,
+      isActive: row.is_active,
+      latestNav: row.dwjz === null ? null : Number(row.dwjz).toFixed(4),
+      latestNavDate: navDate,
+      navChangePct: row.jzzzl === null ? null : Number(row.jzzzl),
+      navFetchedAt: row.created_at ? row.created_at.toISOString() : null,
+      navPending: navDate === null || navDate < navTarget,
+      ...(estMap.get(row.fund_code) ?? { estPct: null, estTime: null, estSource: null }),
+      holdingsDate: row.holdings_date,
+      adviceAction: row.advice_action,
+      adviceConfidence: row.advice_confidence === null ? null : Number(row.advice_confidence),
+      adviceDate: row.advice_date
+    }
+  })
 }
 
 // ---------- 净值/估值序列（详情页图表） ----------

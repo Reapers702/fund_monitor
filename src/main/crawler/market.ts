@@ -353,7 +353,7 @@ export interface KlineRow {
   low: number | null
   volume: number | null
   amount: number | null
-  amp: number | null // 振幅 %
+  pct: number | null // 涨跌幅 %（东财日K 第 8 列；腾讯降级源无此列 → null）
 }
 
 interface KlineResp {
@@ -412,7 +412,7 @@ export async function klinesBySecid(
         low: parseNum(c[4]),
         volume: parseNum(c[5]),
         amount: parseNum(c[6]),
-        amp: parseNum(c[7])
+        pct: parseNum(c[7])
       })
     }
     return { name: d.data?.name ?? '', rows }
@@ -449,7 +449,7 @@ async function klinesFallbackTencent(secid: string, lmt: number): Promise<{ name
     low: parseNum(c[4]),
     volume: parseNum(c[5]),
     amount: null,
-    amp: null
+    pct: null
   }))
   return { name: code, rows }
 }

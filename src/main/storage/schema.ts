@@ -84,6 +84,9 @@ export const SCHEMA_STATEMENTS: string[] = [
       pct         NUMERIC(8,4),
       volume      NUMERIC(20,0),
       amount      NUMERIC(24,2),
+      -- 行来源：kline=数据源官方日K（收盘后定型，权威）；quote=盘中实时价快照；
+      -- NULL=升级前的历史行（来源不可考，视为非官方，遇到官方日K 会校正覆盖）
+      source      VARCHAR(8),
       CONSTRAINT uq_stock UNIQUE (stock_code, trade_date)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_stock ON stock_daily (stock_code, trade_date DESC)`,
@@ -196,6 +199,11 @@ export const MIGRATION_STATEMENTS: string[] = [
   `UPDATE ds_advice SET user_id = 1 WHERE user_id IS NULL`,
   // AI 建议附带"建议仓位占组合比例 %"（可选字段：老记录/模型未给出时为 NULL）
   `ALTER TABLE ds_advice ADD COLUMN IF NOT EXISTS suggested_pct NUMERIC(6,2)`,
+
+  // 个股日K 加"行来源"：区分官方日K（kline）与盘中实时价快照（quote）。
+  // 存量行留 NULL（来源不可考）→ 补拉官方日K 时会被校正覆盖，历史脏行随之自愈。
+  `ALTER TABLE stock_daily ADD COLUMN IF NOT EXISTS source VARCHAR(8)`,
+  `CREATE INDEX IF NOT EXISTS idx_stock_source ON stock_daily (stock_code, source, trade_date DESC)`,
 
   // 费率表重建为按用户（旧结构 id=1 单行 → 新结构 user_id 主键），存量归 guanxin
   `DO $$ BEGIN

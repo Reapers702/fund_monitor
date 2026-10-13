@@ -1,6 +1,10 @@
 // 交易日历单测：静态休市表 + 周末判断 + 最近交易日（网络接口路径由实测覆盖）
 import { describe, it, expect } from 'vitest'
-import { isTradingDayStatic, latestTradingDayStr } from '../src/main/scheduler/tradingCalendar'
+import {
+  isTradingDayStatic,
+  latestClosedTradingDayStr,
+  latestTradingDayStr
+} from '../src/main/scheduler/tradingCalendar'
 
 describe('isTradingDayStatic（静态交易日判断）', () => {
   it('工作日为交易日', () => {
@@ -62,5 +66,24 @@ describe('latestTradingDayStr（最近交易日：非交易日盘后补净值的
   it('长假中间日期向前回退跨节假日', () => {
     // 2026-10-06 周二（国庆假期内）→ 上一个交易日为 2026-09-30 周三
     expect(latestTradingDayStr(new Date(2026, 9, 6))).toBe('2026-09-30')
+  })
+})
+
+describe('latestClosedTradingDayStr（最近"已收盘"交易日：日K 该定型到哪一天）', () => {
+  it('交易日收盘前 → 上一个交易日（当天日K 还没定型）', () => {
+    expect(latestClosedTradingDayStr(new Date(2026, 9, 13, 10, 0))).toBe('2026-10-12')
+    expect(latestClosedTradingDayStr(new Date(2026, 9, 13, 13, 30))).toBe('2026-10-12')
+    expect(latestClosedTradingDayStr(new Date(2026, 9, 13, 15, 0))).toBe('2026-10-12') // 15:00 收盘但数据未落定
+  })
+
+  it('交易日 15:30 后 → 当天（K线应已定型，收盘校正的目标日）', () => {
+    expect(latestClosedTradingDayStr(new Date(2026, 9, 13, 15, 30))).toBe('2026-10-13')
+    expect(latestClosedTradingDayStr(new Date(2026, 9, 13, 21, 0))).toBe('2026-10-13')
+  })
+
+  it('周末/节假日 → 上一个交易日（周末永远没有日K）', () => {
+    expect(latestClosedTradingDayStr(new Date(2026, 9, 10, 12, 0))).toBe('2026-10-09') // 周六
+    expect(latestClosedTradingDayStr(new Date(2026, 9, 11, 20, 0))).toBe('2026-10-09') // 周日
+    expect(latestClosedTradingDayStr(new Date(2026, 9, 2, 16, 0))).toBe('2026-09-30') // 国庆假期内
   })
 })

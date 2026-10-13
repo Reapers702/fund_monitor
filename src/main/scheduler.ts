@@ -1,12 +1,13 @@
 // 后台调度器（计划书 §7.3）：主窗口启动后常驻，按交易时段自动执行
 //  盘中（9:30-11:30, 13:00-15:00，仅交易日）：每 estimateIntervalSeconds 估值采样（T1/T2/T3）
-//  盘后（15:30 起，交易日与非交易日都跑）：净值增量（每 navCheckMinutes 轮询至目标交易日净值出现或 23:00；
+//  盘后（15:30 起，交易日与非交易日都跑）：日K 校正（用数据源官方日K 覆盖当天实时价快照）+
+//    净值增量（每 navCheckMinutes 轮询至目标交易日净值出现或 23:00；
 //    非交易日目标=最近交易日，覆盖"周五净值周六凌晨公布"场景）
 //  收盘后（analyzer.minutes，默认 35 → 15:35，仅交易日）：全部基金 AI 分析 + 非 hold 通知
 // 所有任务均带防重跑标记；交易日判断见 scheduler/time.ts
 import { loadConfig } from './config'
 import { createPool, createAiFundPool, ensureSchema } from './storage/db'
-import { sampleEstimatesCore } from './quotes'
+import { reconcileKlinesCore, sampleEstimatesCore } from './quotes'
 import { runAnalyzeAllCore } from './analyze'
 import { isTaskBusy } from './tasks'
 import { syncFund } from './fund'
@@ -27,10 +28,11 @@ export interface SchedulerState {
   navTodayDone: boolean
   adviceTodayDone: boolean
   valuationTodayDone: boolean
+  klineTodayDone: boolean
   lastLog: string
 }
 
-let state: SchedulerState = { running: false, lastEstimateAt: 0, navTodayDone: false, adviceTodayDone: false, valuationTodayDone: false, lastLog: '未启动' }
+let state: SchedulerState = { running: false, lastEstimateAt: 0, navTodayDone: false, adviceTodayDone: false, valuationTodayDone: false, klineTodayDone: false, lastLog: '未启动' }
 let timer: NodeJS.Timeout | null = null
 // 本会话已做过"今日是否已分析"DB 检查的日期（跨天感知：昨天查过的结果不影响今天）
 let adviceCheckedDate: string | null = null
@@ -41,6 +43,9 @@ let valuationCheckedDate: string | null = null
 let navCheckedDate: string | null = null
 // 上一次净值轮询的时刻：真正按 cfg.fetcher.navCheckMinutes 节流（原实现每 30s 一轮）
 let lastNavRunAt = 0
+// 收盘后日K 校正：本会话已检查的日期 + 上次检查时刻（数据源当天K线偶尔落定较晚，按 10 分钟重试）
+let klineCheckedDate: string | null = null
+let lastKlineRunAt = 0
 
 /** 是否已确认目标交易日净值（所有用户自选基金并集都出净值才算，多用户 M9）。
  *  交易日目标=today；非交易日目标=最近交易日（周五净值周六凌晨公布是常态，周六盘后也要补） */
@@ -149,6 +154,36 @@ async function tick(): Promise<void> {
         navCheckedDate = navDate // 跨天复位：新的一天重新开始轮询
         state.navTodayDone = false
         lastNavRunAt = 0
+      }
+      // 2.0 收盘后日K 校正（先做，让后续提醒/分析用到的是定型日K）：
+      //     当天那根日K 是盘中实时价快照（source='quote'），收盘后用数据源官方日K 覆盖；
+      //     数据源偶尔落定稍晚，故每 10 分钟重试直到拿到（23:00 后放弃，次日盘前/手动刷新还会补）。
+      if (klineCheckedDate !== navDate) {
+        klineCheckedDate = navDate
+        state.klineTodayDone = false
+        lastKlineRunAt = 0
+      }
+      if (!state.klineTodayDone) {
+        const due = Date.now() - lastKlineRunAt >= 10 * 60_000
+        if (m > 23 * 60) {
+          state.klineTodayDone = true // 放弃当日，次日盘前/手动刷新会再核对
+        } else if (due) {
+          lastKlineRunAt = Date.now()
+          try {
+            const k = await reconcileKlinesCore(pool)
+            if (k.need === 0) {
+              state.klineTodayDone = true
+              if (k.added > 0 || k.fixed > 0 || k.removedWeekend > 0) {
+                state.lastLog = `日K 校正：新增 ${k.added} 行 / 校正 ${k.fixed} 行${k.removedWeekend > 0 ? ` / 清周末脏行 ${k.removedWeekend} 行` : ''}（${k.total} 只股票）`
+                logInfo(`[scheduler] ${state.lastLog}`)
+              }
+            } else {
+              logInfo(`[scheduler] 日K 校正待重试：${k.need}/${k.total} 只还没拿到最近交易日官方日K`)
+            }
+          } catch (e) {
+            logWarn(`[scheduler] 日K 校正失败: ${(e as Error).message}`)
+          }
+        }
       }
       if (!state.navTodayDone) {
         const intervalMs = Math.max(1, Number(cfg.fetcher.navCheckMinutes) || 10) * 60_000

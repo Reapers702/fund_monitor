@@ -209,3 +209,31 @@ export function latestTradingDayStr(from = new Date()): string {
   }
   return dateStr(from)
 }
+
+// ---------- 日K 定型判断（日K 补拉/校正的口径，见 quotes.ts） ----------
+// A 股 15:00 收盘，但成交回报/数据源落定要晚一些：与调度器"盘后"口径一致取 15:30。
+// 早于此时间，当天那根日K 还没定型（盘中是实时快照），不能当成"官方日K"。
+
+/** 当日行情是否已过收盘定型时刻（本地时间 >= 15:30） */
+export function isAfterMarketClose(d = new Date()): boolean {
+  return d.getHours() * 60 + d.getMinutes() >= 15 * 60 + 30
+}
+
+/**
+ * 最近一个"已收盘"的交易日 YYYY-MM-DD（该交易日的日K 在数据源应已定型）。
+ * 今天若是交易日且已过 15:30 → 今天；否则回退到上一个交易日（最多回退 14 天）。
+ * 用静态表判断，无网络开销。
+ *
+ * 为什么不能用 latestTradingDayStr 当"日K 目标日"：盘中/盘前它返回今天，而今天的日K 还没定型，
+ * 于是"本地有今天的行"（其实是实时价快照）会被误判成"日K 已最新"，见 src/main/quotes.ts。
+ */
+export function latestClosedTradingDayStr(from = new Date()): string {
+  const d = new Date(from)
+  if (!isAfterMarketClose(d)) d.setDate(d.getDate() - 1) // 今天还没收盘 → 从昨天开始找
+  for (let i = 0; i < 14; i++) {
+    const ds = dateStr(d)
+    if (isTradingDayStatic(d)) return ds
+    d.setDate(d.getDate() - 1)
+  }
+  return dateStr(from)
+}
