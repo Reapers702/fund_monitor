@@ -42,8 +42,13 @@ export async function saveStockDaily(
   const out: StockDailyWriteResult = { written: 0, fixed: 0 }
   if (rows.length === 0) return out
 
+  // 单条语句整批 upsert（unnest 展开数组）：日K 补拉一次 120 根，逐行 INSERT 要走 120 次往返
+  // （实测 120 只股票 ≈ 150s），整批写一次往返即可，语义完全相同、依旧原子。
   const sql = `INSERT INTO stock_daily (stock_code, trade_date, close, open, high, low, pct, volume, amount, source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     SELECT $1, t.d, t.c, t.o, t.h, t.l, t.p, t.v, t.a, $10
+     FROM unnest($2::date[], $3::numeric[], $4::numeric[], $5::numeric[],
+                 $6::numeric[], $7::numeric[], $8::numeric[], $9::numeric[])
+          AS t(d, c, o, h, l, p, v, a)
      ON CONFLICT (stock_code, trade_date) DO UPDATE SET
        close = EXCLUDED.close, open = EXCLUDED.open, high = EXCLUDED.high,
        low = EXCLUDED.low, pct = EXCLUDED.pct, volume = EXCLUDED.volume,
@@ -51,34 +56,23 @@ export async function saveStockDaily(
      WHERE stock_daily.source IS DISTINCT FROM 'kline'
      RETURNING (xmax = 0) AS inserted`
 
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-    for (const r of rows) {
-      const res = await client.query<{ inserted: boolean }>(sql, [
-        code,
-        r.tradeDate,
-        r.close,
-        r.open,
-        r.high,
-        r.low,
-        r.pct,
-        r.volume,
-        r.amount,
-        source
-      ])
-      if ((res.rowCount ?? 0) === 0) continue
-      if (res.rows[0]?.inserted) out.written++
-      else out.fixed++
-    }
-    await client.query('COMMIT')
-    return out
-  } catch (e) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw e
-  } finally {
-    client.release()
+  const res = await pool.query<{ inserted: boolean }>(sql, [
+    code,
+    rows.map((r) => r.tradeDate),
+    rows.map((r) => r.close),
+    rows.map((r) => r.open),
+    rows.map((r) => r.high),
+    rows.map((r) => r.low),
+    rows.map((r) => r.pct),
+    rows.map((r) => r.volume),
+    rows.map((r) => r.amount),
+    source
+  ])
+  for (const r of res.rows) {
+    if (r.inserted) out.written++
+    else out.fixed++
   }
+  return out
 }
 
 /** 清理"周末日期"的行情行。
