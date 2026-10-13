@@ -24,11 +24,30 @@
 }
 
 :root {
-  --color-background: var(--ev-c-black);
-  --color-background-soft: var(--ev-c-black-soft);
-  --color-background-mute: var(--ev-c-black-mute);
+  /* 应用是 naive-ui 亮色主题：底色也要亮色，否则窗口背景（深色）和组件（亮色）打架 */
+  --color-background: #f5f7fa;
+  --color-background-soft: #ffffff;
+  --color-background-mute: #eceef1;
 
-  --color-text: var(--ev-c-text-1);
+  --color-text: rgba(0, 0, 0, 0.88);
+
+  /* 文字层级 / 分隔线：各页面一直在用这几个变量，但此前从未定义过——
+     导致"次要文字"全部退回默认纯黑、层级消失（页面看起来"糊成一片"的原因之一）。 */
+  --text-color-1: rgba(0, 0, 0, 0.88);
+  --text-color-2: rgba(0, 0, 0, 0.6);
+  --text-color-3: rgba(0, 0, 0, 0.42);
+  --divider-color: rgba(0, 0, 0, 0.09);
+  --border-color: rgba(0, 0, 0, 0.12);
+
+  /* 涨跌语义色：A 股习惯 = 红涨绿跌（与各页面原有硬编码保持一致） */
+  --up-color: #e5484d;
+  --down-color: #1f9d55;
+  --flat-color: rgba(0, 0, 0, 0.45);
+  --up-bg: rgba(229, 72, 77, 0.08);
+  --down-bg: rgba(31, 157, 85, 0.09);
+  --info-color: #2080f0;
+
+  --card-radius: 12px;
 }
 
 *,

@@ -1,7 +1,21 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { NEmpty, NInput, NButton, NSpace, NCard, NTag, NSwitch, NSpin, NTooltip, NDivider, NProgress, useMessage } from 'naive-ui'
+import {
+  NEmpty,
+  NInput,
+  NButton,
+  NCard,
+  NTag,
+  NSwitch,
+  NSpin,
+  NTooltip,
+  NDivider,
+  NProgress,
+  NSelect,
+  NCheckbox,
+  useMessage
+} from 'naive-ui'
 import { isRunning, taskOf, taskPercent } from '../taskMonitor'
 
 const router = useRouter()
@@ -55,6 +69,72 @@ function fmtClock(ms: number | null): string {
   const p = (n: number) => String(n).padStart(2, '0')
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
+
+// ---------- 列表：排序 / 过滤 / 概览 ----------
+
+type SortKey = 'default' | 'estDesc' | 'estAsc' | 'name'
+
+const sortKey = ref<SortKey>('default')
+const showInactive = ref(true)
+
+const sortOptions = [
+  { label: '默认（按代码）', value: 'default' },
+  { label: '估值涨幅优先', value: 'estDesc' },
+  { label: '估值跌幅优先', value: 'estAsc' },
+  { label: '按名称', value: 'name' }
+]
+
+const activeFunds = computed(() => funds.value.filter((f) => f.isActive === 1))
+const inactiveCount = computed(() => funds.value.length - activeFunds.value.length)
+
+/** 列表排序：停用的一律沉底（Array.sort 稳定，内部保持所选规则） */
+const shownFunds = computed(() => {
+  const arr = funds.value.filter((f) => showInactive.value || f.isActive === 1)
+  if (sortKey.value === 'estDesc') {
+    arr.sort((a, b) => rank(b.estPct, -1) - rank(a.estPct, -1) || a.code.localeCompare(b.code))
+  } else if (sortKey.value === 'estAsc') {
+    arr.sort((a, b) => rank(a.estPct, 1) - rank(b.estPct, 1) || a.code.localeCompare(b.code))
+  } else if (sortKey.value === 'name') {
+    arr.sort((a, b) => a.name.localeCompare(b.name, 'zh') || a.code.localeCompare(b.code))
+  } else {
+    arr.sort((a, b) => a.code.localeCompare(b.code))
+  }
+  return arr.sort((a, b) => (a.isActive === 1 ? 0 : 1) - (b.isActive === 1 ? 0 : 1))
+})
+
+/** 排序权重：缺失值（null）永远排末尾（降序给 -Infinity，升序给 +Infinity） */
+function rank(v: number | null, dir: 1 | -1): number {
+  if (v === null || Number.isNaN(v))
+    return dir === -1 ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY
+  return v
+}
+
+/** 概览：估值均值 / 涨跌分布 / 数据新鲜度（只看启用中的基金） */
+const overview = computed(() => {
+  const vals = activeFunds.value
+    .map((f) => f.estPct)
+    .filter((v): v is number => v !== null && !Number.isNaN(v))
+  const up = vals.filter((v) => v > 0).length
+  const down = vals.filter((v) => v < 0).length
+  const avg = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null
+  const times = activeFunds.value
+    .map((f) => (f.estTime ? new Date(f.estTime).getTime() : 0))
+    .filter((t) => t > 0)
+  const navDates = [
+    ...new Set(activeFunds.value.map((f) => f.latestNavDate).filter(Boolean))
+  ].sort() as string[]
+  return {
+    total: activeFunds.value.length,
+    up,
+    down,
+    flat: vals.length - up - down,
+    sampled: vals.length,
+    avg,
+    lastEst: times.length > 0 ? new Date(Math.max(...times)).toISOString() : null,
+    navDate: navDates.length > 0 ? navDates[navDates.length - 1] : null,
+    navPending: activeFunds.value.length > 0 && activeFunds.value.some((f) => f.navPending)
+  }
+})
 
 async function load(): Promise<void> {
   loading.value = true
@@ -143,14 +223,17 @@ function openDetail(code: string): void {
   router.push(`/fund/${code}`)
 }
 
+// ---------- 展示格式化 ----------
+
 function fmtPct(v: number | null): string {
   if (v === null || Number.isNaN(v)) return '--'
   return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
 }
 
-function pctClass(v: number | null): string {
-  if (v === null) return 'muted'
-  return v > 0 ? 'up' : v < 0 ? 'down' : 'muted'
+/** 涨跌方向 → 类名（红涨绿跌；无数据/持平用中性色） */
+function dirOf(v: number | null): 'up' | 'down' | 'flat' {
+  if (v === null || Number.isNaN(v) || v === 0) return 'flat'
+  return v > 0 ? 'up' : 'down'
 }
 
 /** 数据拉取/采样时间短格式：当天 → HH:MM，跨天 → MM-DD HH:MM（避免旧数据只见时分而误判新鲜度） */
@@ -160,7 +243,11 @@ function fmtFetchTime(iso: string | null): string {
   const p = (n: number) => String(n).padStart(2, '0')
   const hm = `${p(d.getHours())}:${p(d.getMinutes())}`
   const now = new Date()
-  if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
+  if (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  ) {
     return hm
   }
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`
@@ -169,19 +256,16 @@ function fmtFetchTime(iso: string | null): string {
 function estSourceLabel(f: FundCard): string {
   if (f.estSource === 'tracking_index') return 'T1 跟踪指数'
   if (f.estSource === 'theme_etf') return 'T2 主题ETF'
-  if (f.estSource === 'holdings_weighted') return 'T3 重仓股加权（基于季报）'
+  if (f.estSource === 'holdings_weighted') return 'T3 重仓股加权'
   return '无估值'
 }
 
-/** AI 建议 → 标签（A股习惯：加仓红 / 减仓绿 / 持有蓝） */
-function adviceTag(action: string): { color: { text: string; border: string; color: string }; text: string } {
-  if (action === 'add') {
-    return { text: '建议加仓', color: { text: '#fff', border: '#e5484d', color: '#e5484d' } }
-  }
-  if (action === 'reduce') {
-    return { text: '建议减仓', color: { text: '#fff', border: '#1f9d55', color: '#1f9d55' } }
-  }
-  return { text: '建议持有', color: { text: '#fff', border: '#2080f0', color: '#2080f0' } }
+/** AI 建议文案（颜色由 advice-* 类给：A股习惯 加仓红 / 减仓绿 / 持有蓝） */
+function adviceText(action: string | null): string {
+  if (action === 'add') return '建议加仓'
+  if (action === 'reduce') return '建议减仓'
+  if (action === 'hold') return '建议持有'
+  return '暂无 AI 建议'
 }
 
 let schedulerTimer: number | null = null
@@ -199,37 +283,92 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="dashboard">
-    <n-space align="center" class="toolbar">
-      <n-input
-        v-model:value="newCode"
-        placeholder="输入 6 位基金代码，如 110020"
-        :maxlength="6"
-        class="code-input"
-        @keyup.enter="addFund"
-      />
-      <n-button type="primary" :loading="adding" @click="addFund">添加基金</n-button>
-      <n-divider vertical />
-      <n-button :loading="quotesRunning" :disabled="quotesRunning" @click="refreshQuotes">
-        {{ quotesRunning ? btnText(quotesTask, '刷新行情/估值') : '刷新行情/估值' }}
-      </n-button>
-      <n-button :loading="analyzeRunning" :disabled="analyzeRunning" @click="analyzeAll">
-        {{ analyzeRunning ? btnText(analyzeTask, '全部 AI 分析') : '全部 AI 分析' }}
-      </n-button>
-      <n-tooltip v-if="scheduler" placement="bottom">
-        <template #trigger>
-          <span class="sched-badge" :class="scheduler.running ? 'on' : 'off'">
-            {{ scheduler.running ? '调度运行中' : '调度未启动' }}
-          </span>
-        </template>
-        {{ scheduler.lastLog || '后台任务：盘中估值采样 / 盘后净值增量 / 收盘后 AI 分析' }}
-      </n-tooltip>
-    </n-space>
+    <!-- 概览条：一眼看清"几只、涨跌分布、数据新鲜不新鲜" -->
+    <div class="overview">
+      <div class="ov">
+        <div class="ov-label">自选基金</div>
+        <div class="ov-value">{{ overview.total }}<span class="ov-unit">只</span></div>
+        <div class="ov-note">
+          {{ inactiveCount > 0 ? `含已停用 ${inactiveCount} 只` : '全部启用中' }}
+        </div>
+      </div>
+      <div class="ov">
+        <div class="ov-label">盘中估值 · 均值</div>
+        <div class="ov-value" :class="`v-${dirOf(overview.avg)}`">{{ fmtPct(overview.avg) }}</div>
+        <div class="ov-note">{{ overview.sampled }} 只已采样</div>
+      </div>
+      <div class="ov">
+        <div class="ov-label">涨跌分布</div>
+        <div class="ov-value split">
+          <span class="v-up">↑ {{ overview.up }}</span>
+          <span class="v-flat">– {{ overview.flat }}</span>
+          <span class="v-down">↓ {{ overview.down }}</span>
+        </div>
+        <div class="ov-note">按盘中估值统计 · 红涨绿跌</div>
+      </div>
+      <div class="ov">
+        <div class="ov-label">数据时间</div>
+        <div class="ov-value small">
+          估值 {{ overview.lastEst ? fmtFetchTime(overview.lastEst) : '--' }}
+        </div>
+        <div class="ov-note">
+          净值 {{ overview.navDate ?? '--' }}
+          <template v-if="overview.navPending">（待 T+1 公布）</template>
+        </div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <n-input
+          v-model:value="newCode"
+          placeholder="输入 6 位基金代码，如 110020"
+          :maxlength="6"
+          class="code-input"
+          @keyup.enter="addFund"
+        />
+        <n-button type="primary" :loading="adding" @click="addFund">添加基金</n-button>
+      </div>
+      <div class="toolbar-right">
+        <n-select v-model:value="sortKey" size="small" :options="sortOptions" class="sort-select" />
+        <n-checkbox v-model:checked="showInactive" size="small">显示已停用</n-checkbox>
+        <n-divider vertical />
+        <n-button
+          size="small"
+          :loading="quotesRunning"
+          :disabled="quotesRunning"
+          @click="refreshQuotes"
+        >
+          {{ quotesRunning ? btnText(quotesTask, '刷新行情/估值') : '刷新行情/估值' }}
+        </n-button>
+        <n-button
+          size="small"
+          :loading="analyzeRunning"
+          :disabled="analyzeRunning"
+          @click="analyzeAll"
+        >
+          {{ analyzeRunning ? btnText(analyzeTask, '全部 AI 分析') : '全部 AI 分析' }}
+        </n-button>
+        <n-tooltip v-if="scheduler" placement="bottom">
+          <template #trigger>
+            <span class="sched-badge" :class="scheduler.running ? 'on' : 'off'">
+              {{ scheduler.running ? '调度运行中' : '调度未启动' }}
+            </span>
+          </template>
+          {{ scheduler.lastLog || '后台任务：盘中估值采样 / 盘后净值增量 / 收盘后 AI 分析' }}
+        </n-tooltip>
+      </div>
+    </div>
 
     <!-- 任务进度面板：跑起来显示阶段/进度/当前标的/最近完成项；跑完保留"上次完成"，切页面回来也能看到结果 -->
     <n-card v-if="visibleTasks.length > 0" size="small" class="task-panel">
       <div v-for="t in visibleTasks" :key="t.kind" class="task-row">
         <div class="task-head">
-          <n-tag size="tiny" :type="t.state === 'running' ? 'warning' : t.state === 'error' ? 'error' : 'success'" :bordered="false">
+          <n-tag
+            size="tiny"
+            :type="t.state === 'running' ? 'warning' : t.state === 'error' ? 'error' : 'success'"
+            :bordered="false"
+          >
             {{ t.state === 'running' ? '进行中' : t.state === 'error' ? '失败' : '已完成' }}
           </n-tag>
           <span class="task-label">{{ t.label }}</span>
@@ -241,7 +380,13 @@ onBeforeUnmount(() => {
           <span v-else-if="t.summary" class="task-phase">{{ t.summary }}</span>
           <span v-else-if="t.error" class="task-phase err">{{ t.error }}</span>
           <span class="task-time">
-            {{ t.state === 'running' ? `开始于 ${fmtClock(t.startedAt)}` : t.finishedAt ? `${fmtClock(t.finishedAt)} 结束` : '' }}
+            {{
+              t.state === 'running'
+                ? `开始于 ${fmtClock(t.startedAt)}`
+                : t.finishedAt
+                  ? `${fmtClock(t.finishedAt)} 结束`
+                  : ''
+            }}
           </span>
         </div>
         <n-progress
@@ -270,14 +415,27 @@ onBeforeUnmount(() => {
 
       <div v-else class="cards">
         <n-card
-          v-for="f in funds"
+          v-for="f in shownFunds"
           :key="f.code"
           class="fund-card"
-          :class="{ inactive: f.isActive !== 1 }"
+          :class="[`dir-${dirOf(f.estPct)}`, { inactive: f.isActive !== 1 }]"
           @click="openDetail(f.code)"
         >
           <div class="card-head">
-            <div class="fund-name" :title="f.name">{{ f.name }}</div>
+            <div class="ident">
+              <div class="fund-name" :title="f.name">{{ f.name }}</div>
+              <div class="ident-sub">
+                <span class="fund-code">{{ f.code }}</span>
+                <span v-if="f.isActive !== 1" class="pill pill-off">已停用</span>
+                <span
+                  v-else-if="f.navPending"
+                  class="pill pill-warn"
+                  title="基金净值 T+1 公布：今天盘中的净值/涨跌要等今晚更新后才有"
+                >
+                  净值待公布
+                </span>
+              </div>
+            </div>
             <n-switch
               size="small"
               :value="f.isActive === 1"
@@ -285,44 +443,47 @@ onBeforeUnmount(() => {
               @click.stop
             />
           </div>
-          <div class="fund-code">{{ f.code }}</div>
-          <div class="metrics">
-            <div class="metric">
-              <div class="metric-label">最新净值</div>
-              <div class="metric-value">{{ f.latestNav ?? '--' }}</div>
-              <div class="metric-sub">
-                {{ f.latestNavDate ?? '' }}{{ f.navFetchedAt ? ' · ' + fmtFetchTime(f.navFetchedAt) + ' 拉取' : '' }}
+
+          <div class="hero">
+            <div class="hero-left">
+              <div class="hero-label">盘中估值</div>
+              <div class="hero-value" :class="`v-${dirOf(f.estPct)}`">{{ fmtPct(f.estPct) }}</div>
+            </div>
+            <div class="hero-right">
+              <div class="hero-source" :title="estSourceLabel(f)">{{ estSourceLabel(f) }}</div>
+              <div class="hero-time">
+                {{ f.estTime ? `${fmtFetchTime(f.estTime)} 采样` : '今日暂无采样' }}
               </div>
             </div>
-            <div class="metric">
-              <div class="metric-label">当日涨跌</div>
-              <div class="metric-value" :class="pctClass(f.navChangePct)">
+          </div>
+
+          <div class="facts">
+            <div class="fact">
+              <div class="fact-label">最新净值</div>
+              <div class="fact-value">{{ f.latestNav ?? '--' }}</div>
+              <div class="fact-note">{{ f.latestNavDate ?? '--' }}</div>
+            </div>
+            <div class="fact">
+              <div class="fact-label">净值涨跌</div>
+              <div class="fact-value" :class="`v-${dirOf(f.navChangePct)}`">
                 {{ fmtPct(f.navChangePct) }}
               </div>
-              <div class="metric-sub">净值</div>
-            </div>
-            <div class="metric">
-              <div class="metric-label">盘中估值</div>
-              <div class="metric-value" :class="pctClass(f.estPct)">
-                {{ fmtPct(f.estPct) }}
-              </div>
-              <div class="metric-sub">
-                {{ estSourceLabel(f) }}{{ f.estTime ? ' · ' + fmtFetchTime(f.estTime) + ' 采样' : '' }}
-              </div>
+              <div class="fact-note">{{ f.latestNavDate ? `${f.latestNavDate} 收盘` : '--' }}</div>
             </div>
           </div>
-          <div class="advice-bar">
-            <n-tag v-if="f.adviceAction" size="small" :color="adviceTag(f.adviceAction).color" :bordered="false" class="advice-tag">
-              {{ adviceTag(f.adviceAction).text }}
-            </n-tag>
-            <span v-if="f.adviceDate" class="advice-date">建议日期 {{ f.adviceDate }}</span>
-            <span v-if="f.adviceConfidence !== null" class="advice-conf">置信 {{ f.adviceConfidence }}%</span>
-            <span v-if="!f.adviceAction" class="advice-none">暂无 AI 建议</span>
-          </div>
+
           <div class="card-foot">
-            <n-tag v-if="f.isActive !== 1" size="tiny" type="default">已停用</n-tag>
-            <n-tag v-else size="tiny" type="success">启用中</n-tag>
-            <span v-if="f.holdingsDate" class="holdings-date">重仓股季报 {{ f.holdingsDate }}</span>
+            <span class="advice" :class="`advice-${f.adviceAction ?? 'none'}`">{{
+              adviceText(f.adviceAction)
+            }}</span>
+            <span v-if="f.adviceAction && f.adviceConfidence !== null" class="foot-muted"
+              >置信 {{ f.adviceConfidence }}%</span
+            >
+            <span v-if="f.adviceDate" class="foot-muted">{{ f.adviceDate }}</span>
+            <span class="spacer" />
+            <span v-if="f.holdingsDate" class="foot-muted" title="最新季报重仓股报告期"
+              >重仓 {{ f.holdingsDate }}</span
+            >
           </div>
         </n-card>
       </div>
@@ -331,13 +492,112 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.toolbar {
-  margin-bottom: 20px;
+.dashboard {
+  padding-bottom: 8px;
 }
 
-/* 任务进度面板 */
+/* ---------- 概览条 ---------- */
+
+.overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1px;
+  background: var(--divider-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--card-radius);
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+
+.ov {
+  background: #fff;
+  padding: 12px 16px;
+}
+
+.ov-label {
+  font-size: 12px;
+  color: var(--text-color-3);
+}
+
+.ov-value {
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+  line-height: 1.3;
+}
+
+.ov-value.small {
+  font-size: 15px;
+}
+
+.ov-value.split {
+  display: flex;
+  gap: 10px;
+  font-size: 16px;
+}
+
+.ov-unit {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-color-3);
+  margin-left: 2px;
+}
+
+.ov-note {
+  font-size: 11px;
+  color: var(--text-color-3);
+  margin-top: 2px;
+}
+
+/* ---------- 工具栏 ---------- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.toolbar-left,
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.code-input {
+  width: 240px;
+}
+
+.sort-select {
+  width: 150px;
+}
+
+.sched-badge {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  cursor: default;
+}
+
+.sched-badge.on {
+  color: var(--down-color);
+  background: var(--down-bg);
+}
+
+.sched-badge.off {
+  color: var(--text-color-3);
+  background: rgba(128, 128, 128, 0.12);
+}
+
+/* ---------- 任务进度面板 ---------- */
+
 .task-panel {
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 }
 
 .task-row + .task-row {
@@ -363,7 +623,7 @@ onBeforeUnmount(() => {
 }
 
 .task-phase.err {
-  color: #e5484d;
+  color: var(--up-color);
 }
 
 .task-time {
@@ -388,143 +648,237 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.code-input {
-  width: 260px;
-}
-
-.sched-badge {
-  font-size: 12px;
-  padding: 2px 10px;
-  border-radius: 10px;
-  cursor: default;
-}
-
-.sched-badge.on {
-  color: #1f9d55;
-  background: rgba(31, 157, 85, 0.12);
-}
-
-.sched-badge.off {
-  color: var(--text-color-3);
-  background: rgba(128, 128, 128, 0.12);
-}
+/* ---------- 基金卡片 ---------- */
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
 }
 
 .fund-card {
   cursor: pointer;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  border-radius: var(--card-radius);
+  border-left: 3px solid var(--border-color);
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
 }
 
 .fund-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.1);
+}
+
+/* 左侧色条 = 盘中估值方向（红涨绿跌），扫一眼就能看出好坏 */
+.fund-card.dir-up {
+  border-left-color: var(--up-color);
+}
+
+.fund-card.dir-down {
+  border-left-color: var(--down-color);
+}
+
+.fund-card.dir-flat {
+  border-left-color: var(--border-color);
 }
 
 .fund-card.inactive {
-  opacity: 0.55;
+  opacity: 0.6;
 }
 
 .card-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+}
+
+.ident {
+  min-width: 0;
 }
 
 .fund-name {
   font-weight: 600;
   font-size: 15px;
+  line-height: 1.35;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.ident-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
 .fund-code {
   font-size: 12px;
   color: var(--text-color-3);
-  margin-top: 2px;
-}
-
-.metrics {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 14px;
-}
-
-.metric {
-  text-align: center;
-  flex: 1;
-}
-
-.metric-label {
-  font-size: 12px;
-  color: var(--text-color-3);
-}
-
-.metric-value {
-  font-size: 17px;
-  font-weight: 700;
-  margin-top: 4px;
   font-variant-numeric: tabular-nums;
 }
 
-.metric-sub {
+.pill {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  line-height: 1.6;
+}
+
+.pill-off {
+  color: var(--text-color-3);
+  background: rgba(128, 128, 128, 0.14);
+}
+
+.pill-warn {
+  color: #b26a00;
+  background: rgba(240, 160, 32, 0.16);
+}
+
+/* 主指标：盘中估值（视觉主角，带方向底色） */
+.hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(128, 128, 128, 0.06);
+}
+
+.dir-up .hero {
+  background: var(--up-bg);
+}
+
+.dir-down .hero {
+  background: var(--down-bg);
+}
+
+.hero-label {
+  font-size: 12px;
+  color: var(--text-color-2);
+}
+
+.hero-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.5px;
+}
+
+.hero-right {
+  text-align: right;
+  min-width: 0;
+}
+
+.hero-source {
+  font-size: 11px;
+  color: var(--text-color-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+  margin-left: auto;
+}
+
+.hero-time {
   font-size: 11px;
   color: var(--text-color-3);
   margin-top: 2px;
 }
 
-.up {
-  color: #e5484d;
-}
-
-.down {
-  color: #1f9d55;
-}
-
-.muted {
-  color: var(--text-color-3);
-}
-
-.advice-bar {
+/* 次指标：净值两列 */
+.facts {
   display: flex;
-  align-items: center;
   gap: 8px;
-  margin-top: 14px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border-color, rgba(128, 128, 128, 0.2));
+  margin-top: 12px;
 }
 
-.advice-tag {
+.fact {
+  flex: 1;
+  min-width: 0;
+}
+
+.fact-label {
+  font-size: 12px;
+  color: var(--text-color-3);
+}
+
+.fact-value {
+  font-size: 16px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
 }
 
-.advice-date,
-.advice-conf {
-  font-size: 12px;
+.fact-note {
+  font-size: 11px;
   color: var(--text-color-3);
 }
 
-.advice-none {
-  font-size: 12px;
-  color: var(--text-color-3);
-}
-
+/* 底部：AI 建议 + 数据日期 */
 .card-foot {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--divider-color);
 }
 
-.holdings-date {
+.spacer {
+  flex: 1;
+}
+
+.advice {
   font-size: 12px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 8px;
+  color: #fff;
+  background: var(--flat-color);
+}
+
+.advice-add {
+  background: var(--up-color);
+}
+
+.advice-reduce {
+  background: var(--down-color);
+}
+
+.advice-hold {
+  background: var(--info-color);
+}
+
+.advice-none {
   color: var(--text-color-3);
+  background: rgba(128, 128, 128, 0.12);
+  font-weight: 400;
+}
+
+.foot-muted {
+  font-size: 11px;
+  color: var(--text-color-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 涨跌色（红涨绿跌） */
+.v-up {
+  color: var(--up-color);
+}
+
+.v-down {
+  color: var(--down-color);
+}
+
+.v-flat {
+  color: var(--flat-color);
 }
 
 .empty-box {

@@ -59,7 +59,8 @@ interface FundCard {
   latestNav: string | null
   latestNavDate: string | null
   navChangePct: number | null
-  navFetchedAt: string | null
+  navFetchedAt: string | null // 该条净值入库（抓取）时间，ISO；不是"刚刚刷新"的时间
+  navPending: boolean // 今天（最近交易日）的净值还没公布 → 卡片提示"待 T+1 公布"
   estPct: number | null
   estTime: string | null
   estSource: string | null
@@ -255,8 +256,10 @@ interface QuotesRunResult {
   result: {
     fundCount: number
     stockCount: number
-    klineAdded: number
-    klineSkipped: number // 本地已有最近交易日日K、跳过补拉的股票数（P0 降请求量）
+    klineAdded: number // 新补入库的日K 行数
+    klineFixed: number // 用官方日K 校正（覆盖实时价快照等非官方行）的行数
+    klineSkipped: number // 官方日K 已覆盖最近一个已收盘交易日，跳过补拉的股票数
+    klineThrottled: number // 6 小时内刚补过、被节流跳过的股票数
     estimates: { code: string; name: string; source: string; pct: number | null }[]
     errors: { code: string; message: string }[]
   } | null
