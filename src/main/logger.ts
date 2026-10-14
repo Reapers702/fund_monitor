@@ -26,6 +26,10 @@ export interface LogEntry {
 let logDir: string | null = null
 let patched = false
 const ring: LogEntry[] = []
+// initLogger() 之前的日志（启动早期、乃至未捕获异常）：先攒着，init 时补写进当天的日志文件，
+// 否则打包后的 GUI 应用没有 stdout，这段时间的日志就彻底丢了
+let pending: LogEntry[] = []
+const PENDING_MAX = 200
 
 /** 初始化日志目录（app ready 后调用；失败静默降级为仅控制台），并清理过期日志、接管 console。
  *  userDataDir 由调用方（index.ts）传入 app.getPath('userData')——logger 刻意不 import electron，
@@ -35,11 +39,28 @@ export function initLogger(userDataDir: string): void {
     logDir = join(userDataDir, 'logs')
     if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true })
     cleanupOldLogs()
+    flushPending()
   } catch (e) {
     console.warn(`[logger] 初始化失败（降级仅控制台）: ${(e as Error).message}`)
     logDir = null
   }
   patchConsole()
+}
+
+/** 把 initLogger() 之前攒下的日志补写到今天的日志文件 */
+function flushPending(): void {
+  if (!logDir || pending.length === 0) return
+  const lines = pending.map((e) => formatLine(e)).join('')
+  pending = []
+  try {
+    appendFileSync(todayFile(), lines, 'utf8')
+  } catch {
+    /* 写失败静默（磁盘满/权限），不影响主流程 */
+  }
+}
+
+function formatLine(entry: LogEntry): string {
+  return `[${new Date(entry.ts).toISOString()}] [${entry.level}] ${entry.msg}\n`
 }
 
 /** 日志目录绝对路径（GUI「打开日志目录」用）；未初始化返回 null */
@@ -131,10 +152,14 @@ function write(level: LogLevel, msg: string): void {
   if (ring.length > RING_MAX) ring.shift()
 
   const file = todayFile()
-  if (!file) return
-  const line = `[${new Date(entry.ts).toISOString()}] [${level}] ${msg}\n`
+  if (!file) {
+    // 还没 initLogger（或初始化失败）：先攒在内存里，init 后补写文件
+    pending.push(entry)
+    if (pending.length > PENDING_MAX) pending.shift()
+    return
+  }
   try {
-    appendFileSync(file, line, 'utf8')
+    appendFileSync(file, formatLine(entry), 'utf8')
   } catch {
     /* 写失败静默（磁盘满/权限），不影响主流程 */
   }

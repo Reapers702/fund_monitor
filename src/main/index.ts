@@ -11,12 +11,29 @@ import { runAlerts } from './alerts'
 import { runAnalyzeAll, runAnalyzeOne } from './analyze'
 import { runBacktest } from './backtest'
 import { startScheduler, stopScheduler } from './scheduler'
-import { initLogger, logInfo, logWarn } from './logger'
+import { initLogger, logInfo, logWarn, logError } from './logger'
 import { destroyBrowserChannel } from './crawler/pageFetcher'
 import { initUser, ensureDefaultUser } from './user'
 import { loadConfig } from './config'
 import { createPool, ensureSchema } from './storage/db'
 import { redirectUserData } from './userData'
+
+// ── 主进程级错误兜底（必须在任何可能抛错的动作之前注册） ─────────────────────────
+// Electron 内置了默认处理：若进程上只有它自己的 uncaughtException 监听（listenerCount === 1），
+// 就 dialog.showErrorBox 弹出「A JavaScript error occurred in the main process / Uncaught Exception」
+// 的原始堆栈模态框（见 electron/lib/browser/init.ts）。挂上我们自己的监听后，该弹窗不再出现；
+// 应用继续运行（与原先一致）——这类异常绝大多数是网络/远端库抖动（例如 pg 连接被掐断），
+// 调度器 30s 后自然重试；信息落 userData/logs 与 GUI「抓取日志」页，需要时再查，不再打断使用。
+function logMainProcessError(kind: string, e: Error): void {
+  const head = `[${kind}] 主进程异常（已记录，应用继续运行）: ${e.name}: ${e.message}`
+  logError(`${head}\n${(e.stack ?? '').slice(0, 4000)}`)
+}
+
+process.on('uncaughtException', (err) => logMainProcessError('uncaught', err))
+process.on('unhandledRejection', (reason) => {
+  logMainProcessError('unhandled', reason instanceof Error ? reason : new Error(String(reason)))
+})
+logInfo('[guard] 主进程错误兜底已安装：未捕获异常/未处理拒绝只记日志，不再弹「Uncaught Exception」模态框')
 
 // 启动最早：userData 重定向到英文目录 fund_monitor（默认是中文 productName 目录），并迁移旧 config/logs。
 // 必须先于 config.ts configPath / logger.ts initLogger 对 userData 的读取。

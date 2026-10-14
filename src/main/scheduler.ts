@@ -6,7 +6,7 @@
 //  收盘后（analyzer.minutes，默认 35 → 15:35，仅交易日）：全部基金 AI 分析 + 非 hold 通知
 // 所有任务均带防重跑标记；交易日判断见 scheduler/time.ts
 import { loadConfig } from './config'
-import { createPool, createAiFundPool, ensureSchema } from './storage/db'
+import { createPool, createAiFundPool, ensureSchemaOnce } from './storage/db'
 import { reconcileKlinesCore, sampleEstimatesCore } from './quotes'
 import { runAnalyzeAllCore } from './analyze'
 import { isTaskBusy } from './tasks'
@@ -93,7 +93,9 @@ async function tick(): Promise<void> {
   const pool = createPool(cfg)
 
   try {
-    await ensureSchema(pool)
+    // 每 30s 一次 tick：建表只需成功一次（ensureSchemaOnce 按库记忆，失败不缓存），
+    // 避免在共享库上反复跑 30+ 条 DDL 取表锁、也避免连接抖动时整个建表事务白跑
+    await ensureSchemaOnce(pool)
 
     // 0. 指数估值快照（价值因子）：每自然日一次，收盘后（15:00 起）抓蛋卷当日快照落库，累积历史。
     //    交易/非交易日都抓（快照是日历日粒度的，周末也有当日值）；以 index_valuation 当日记录判重（跨重启不重跑）。
