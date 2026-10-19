@@ -8,18 +8,29 @@
  *     而"今天用今天的估值分位"完全合法 —— 所以只有同日 A/B 才能测到估值块的影响。
  *   - 历史窗口只能测新闻选材那一路（raw_news 历史完整），那是另一套脚本的事。
  *
- * 基线是 git 父提交里的真实旧代码，不是手工复刻：
- *   旧版 = 621c6f6（两个 commit 之前）：无板块估值分位块、无资金与仓位块、
- *          新闻按"全库最新 10 条"取（无时效标注、无 [行业]/[大盘] 归属）
+ * 基线是 git 历史里的真实旧代码，不是手工复刻：
+ *   旧版 = git archive <基线> 导出的源码树（渲染逻辑与它自带的 SYSTEM_PROMPT 都是当时的），
+ *          且脚本不传估值块/资金块、新闻固定用"全库最新 10 条"（旧选材口径）
  *   新版 = 当前工作区：上述三块齐全
- * 两版共用同一份净值/重仓股/指标数据，变量只有这三处 —— 正是两个 commit 的差异。
+ * 两版共用同一份净值/重仓股/指标数据，变量只有这三处 —— 正是被比较的改动。
+ *
+ * --base 的语义（重要）：它换的是"旧版代码"，但**对比变量是固定的**（估值分位 / 资金与仓位 /
+ * 新闻时效选材这三块）。所以 --base 应指向"这三块改动之前的提交"（默认 621c6f6）；
+ * 随便指一个别的提交，差异里会混入无关变量（例如该提交自己的持仓块文案变化）。
  *
  * 用法：
  *   node scripts/ab-prompt-compare.mjs                              # 默认 8 只代表性基金
+ *   node scripts/ab-prompt-compare.mjs --repeat 3                   # 每版重复 3 次（强烈建议，见下）
+ *   node scripts/ab-prompt-compare.mjs --temp 0                     # 确定性对照（默认已是 0）
  *   node scripts/ab-prompt-compare.mjs --codes 161725,001594        # 指定基金
- *   node scripts/ab-prompt-compare.mjs --dump                        # 额外落盘两版完整 prompt
+ *   node scripts/ab-prompt-compare.mjs --base <git-ref>             # 换基线提交
+ *   node scripts/ab-prompt-compare.mjs --dump                       # 额外落盘两版完整 prompt
  *
- * 输出：控制台对比表 + .tmp-ab/ab-result.json（含两版完整 prompt、原始响应、用量）
+ * 为什么建议 --repeat ≥3：LLM 有采样随机性，实测同一数据同一 prompt 跑 3 次会出现
+ * hold/add/hold 混合。单次 A/B 的"方向变化"大部分是噪声 —— 本项目第一次单次实验得出
+ * "3/8 方向变化"，重复 3 次后发现那 3 只全部属于版本内不稳定，真实差异是 0。
+ *
+ * 输出：控制台对比表 + .tmp-ab/ab-result.json（含两版完整 prompt、原始响应、每次运行的结论与用量）
  */
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -42,8 +53,6 @@ import {
 } from './diagnose-prompt-data.mjs'
 
 // ---------- 配置 ----------
-/** 改动前的基线提交（两个 commit 的父提交） */
-const OLD_REF = '621c6f6'
 const TMP = '.tmp-ab'
 /** 默认基金：覆盖有估值分位匹配的不同板块 */
 const DEFAULT_CODES = ['161725', '001594', '004069', '017469', '001550', '161024', '501057', '100032']
@@ -53,6 +62,11 @@ const argOf = (f) => {
   const i = argv.indexOf(f)
   return i >= 0 ? argv[i + 1] : undefined
 }
+/**
+ * 基线提交：默认 621c6f6（本工具诞生时"两个 AI 数据 commit"的父提交）。
+ * 比较别的改动时用 `--base <git-ref>` 指定该改动之前的提交即可。
+ */
+const OLD_REF = argOf('--base') ?? '621c6f6'
 const codes = (argOf('--codes') ?? DEFAULT_CODES.join(',')).split(',').map((s) => s.trim()).filter(Boolean)
 const dumpPrompts = argv.includes('--dump')
 /** 每个版本重复调用次数：单次结果含 LLM 随机性，重复才能区分"真信号"与"噪声" */
@@ -89,7 +103,8 @@ export default { app, BrowserWindow, shell, ipcMain, Notification, Tray, Menu, n
 )
 
 // 导出父提交的 src/main 树（真实旧代码，自洽解析其相对 import）
-const oldDir = `${TMP}/old`
+// 目录名带 ref：换了 --base 就走独立目录，不会被上一次的缓存污染
+const oldDir = `${TMP}/old-${OLD_REF.replace(/[^a-zA-Z0-9._-]/g, '_')}`
 mkdirSync(oldDir, { recursive: true })
 if (existsSync(`${oldDir}/src/main/analyzer/analyze.ts`)) {
   console.log(`基线代码 ${OLD_REF} 已存在，跳过导出`)

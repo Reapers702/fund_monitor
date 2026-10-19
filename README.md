@@ -178,6 +178,18 @@ npm run build        # 类型检查 + 构建
 npm run build:win    # NSIS 安装包
 ```
 
+### 排查与实验工具（`scripts/`）
+
+`scripts/` 下是独立 node 脚本，覆盖 **AI 预测数据体检 / prompt 改动 A/B 实验 / prompt 组装断言 / 建库 / 识图**。
+用法、参数、成本与坑（如 LLM 中转站限流、为什么必须重复采样）见 **[scripts/README.md](scripts/README.md)**。
+
+```bash
+node scripts/diagnose-prompt-data.mjs              # AI 预测数据体检（新闻健康度/命中率/prompt 快照）
+node scripts/diagnose-prompt-data.mjs --prompt 161725   # 渲染某只基金 AI 实际收到的完整 prompt
+node scripts/ab-prompt-compare.mjs --repeat 3      # 同日 A/B：改动前后两版 prompt 对比建议
+node scripts/verify-prompt-blocks.mjs              # 用真实 analyze.ts 跑 prompt 组装断言
+```
+
 ## 待实现（Roadmap）
 
 当前 M1-M8 主体已完成并可用，以下为后续可选项（按优先级大致排序）：
