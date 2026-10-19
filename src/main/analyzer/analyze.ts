@@ -1,16 +1,25 @@
 // AI 分析（计划书 §7.3）：对单只基金生成 加仓/减仓/持有 建议
 // 输入：近120日净值 + 量化指标（回撤/波动/夏普/相对沪深300超额）+ 板块估值分位 + 今日涨跌
 //      + 盘中估值（当日采样抽稀）+ 重仓股近10日表现 + 相关新闻（时效优先选材，见 news/reader.ts）
-//      + 用户持仓（份额/成本/盈亏）+ 组合上下文 + 规则引擎参考分
+//      + 用户持仓与资金计划（买入本金/份额/盈亏、计划投入、剩余闲钱、该基金占比）
+//      + 组合上下文 + 规则引擎参考分
 // 输出：固定 JSON { action, confidence, reason }，写 ds_advice 保留 response_raw；action != hold 触发桌面通知
 // 体检工具：node scripts/diagnose-prompt-data.mjs（渲染真实 prompt 快照，检查各块是否按预期进入）
 import type { Pool } from 'pg'
 import { chatComplete, hasDeepseekKey, DeepseekError } from '../llm/deepseek'
-import { navSeries, latestHoldings, fundBasic, estimateSeries, listFunds, latestHoldingsBatch, navSeriesBatch } from '../storage/queries'
+import {
+  navSeries,
+  latestHoldings,
+  fundBasic,
+  estimateSeries,
+  listFunds,
+  latestHoldingsBatch,
+  navSeriesBatch
+} from '../storage/queries'
 import type { EstPoint, NavPoint, HoldingWithStock } from '../storage/queries'
 import { recentNewsForFunds } from '../news/reader'
-import { computePosition, listPositions } from '../position/position'
-import type { PositionSummary } from '../position/position'
+import { computePosition, listPositions, computeCapitalSummary } from '../position/position'
+import type { PositionSummary, CapitalSummary } from '../position/position'
 import { analyzePortfolio, formatPortfolioContext } from '../portfolio/portfolio'
 import { createAiFundPool } from '../storage/db'
 import { isIntraday, isAfterClose } from '../scheduler/time'
@@ -65,7 +74,11 @@ function newsAgeTag(pubTime: Date): string {
  * 用于让 AI 区分"盘中估算值 vs 收盘确认净值"、"盘前预判 vs 盘后复盘"。
  * isTradingDay 由调用方异步计算（交易日历走网络/缓存），此处只做纯文本组装。
  */
-export function buildTimeContext(now: Date, latestNavDate: string | null, isTradingDay: boolean): TimeContext {
+export function buildTimeContext(
+  now: Date,
+  latestNavDate: string | null,
+  isTradingDay: boolean
+): TimeContext {
   const weekday = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()]
   const m = now.getHours() * 60 + now.getMinutes()
   const phase = isIntraday(m) ? '盘中' : isAfterClose(m) ? '盘后' : '盘前'
@@ -86,7 +99,9 @@ export function formatTimeContext(t: TimeContext): string {
   const navTag = t.navIsToday
     ? '最新净值已是今日（收盘确认值）'
     : `最新净值截至 ${t.latestNavDate ?? '未知'}（${
-        t.phase === '盘中' ? '今日盘中，最新净值尚未公布，以盘中估值参考' : '非最新交易日，当前数据为最近一个交易日的确认值'
+        t.phase === '盘中'
+          ? '今日盘中，最新净值尚未公布，以盘中估值参考'
+          : '非最新交易日，当前数据为最近一个交易日的确认值'
       }）`
   return `分析时点：${t.date}（周${t.weekday}，${dayTag}，${t.phase}）。${navTag}。`
 }
@@ -115,7 +130,8 @@ export const SYSTEM_PROMPT = `你是基金投资分析助手。基于给定的�
 12. suggestedPct：加仓给高于当前的比例、减仓给低于当前的比例、持有给持平；无持仓把握可填 null。
 13. 若给出了「板块估值分位」，只作长周期贵/便宜的参考轴：分位极低（如 <20%）时，深跌更可能是"便宜"而非"趋势恶化"，此时减少减仓权重、但不等于可以抄底（仍要动量/催化剂交叉验证）；分位极高（如 >80%）时，反弹更可能是"贵"而非"值得追"，此时减少加仓权重。禁止仅凭估值分位下单。
 14. 新闻列表的方括号含义：[行业]=与该基金或其重仓股相关，[大盘]=行业新闻不足时的市场环境兜底（不可当成该基金的消息）；括号内是「日期|距今天数|情绪」。距今天数越大参考价值越低，超过 2 周且无摘要的旧闻不要当作"催化剂"。
-15. reason 必须点明触发了哪几条交叉信号（动量/超额/企稳/催化/破位/利空/估值分位），并说明为何达成或未达成操作条件，避免"等待企稳/观察再说"这类不给出操作的套话。`
+15. reason 必须点明触发了哪几条交叉信号（动量/超额/企稳/催化/破位/利空/估值分位），并说明为何达成或未达成操作条件，避免"等待企稳/观察再说"这类不给出操作的套话。
+16. 若给出了「资金与仓位」，当作资金约束使用：建议加仓时不得超出"剩余闲钱"（也不再重复建议已用满的仓位）；闲钱为负（已超支）时只考虑持有或减仓、禁止建议加仓。判断该基金仓位轻重时，同时参考"占已投入本金/占计划投入/占组合市值"三个比例，不要只看盈亏比例。`
 
 /** 估值来源 → 中文说明（与 alerts/UI 共用一份，见 crawler/estimate.ts） */
 const SOURCE_NAMES = ESTIMATE_SOURCE_NAMES
@@ -126,7 +142,10 @@ const SOURCE_NAMES = ESTIMATE_SOURCE_NAMES
  * 盘中高频采样（默认每 5 分钟一条）会撑爆 prompt，故按 30 分钟窗口抽稀、最多留 12 条。
  * 无当日采样（盘前/非交易日）返回 null，调用方不拼该块。
  */
-export function formatEstimateBlock(estimate: EstPoint[], today = dateStr(new Date())): string | null {
+export function formatEstimateBlock(
+  estimate: EstPoint[],
+  today = dateStr(new Date())
+): string | null {
   const points = estimate.filter((p) => dateStr(new Date(p.time)) === today)
   if (points.length === 0) return null
 
@@ -151,15 +170,77 @@ export function formatEstimateBlock(estimate: EstPoint[], today = dateStr(new Da
 ${picked.map((p) => `${hm(p)} ${pct(p)}`).join('\n')}`
 }
 
-/** 拼装 User Prompt（导出供单测：验证指标/持仓/新闻/时点各块确实进入提示词） */
+/**
+ * 资金与仓位块：让 AI 知道"用户手上有多少钱、已经投了多少、这只基金占多少"。
+ *
+ * 为什么必须给：只给"份额/成本/盈亏"，模型不知道用户还有没有钱可加仓，
+ * 也看不到"这只基金只占预算 12%"这类仓位轻重——只看盈亏比例会误判轻重。
+ * 闲钱口径见 position.ts computeCapitalSummary：计划投入 − 已投入本金（负值 = 超支）。
+ */
+export function formatCapitalBlock(
+  capital: CapitalSummary | null,
+  position: PositionSummary | null
+): string {
+  const money = (v: number | null | undefined): string =>
+    v === null || v === undefined ? '--' : v.toFixed(2)
+  const signed = (v: number | null | undefined): string =>
+    v === null || v === undefined ? '--' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
+  const plain = (v: number | null | undefined): string =>
+    v === null || v === undefined ? '--' : `${v.toFixed(2)}%`
+
+  const lines: string[] = ['资金与仓位（用户实盘口径，金额单位：元）：']
+
+  if (capital && capital.marketBudget > 0) {
+    lines.push(
+      `- 计划投入基金市场 ${money(capital.marketBudget)}；已投入本金 ${money(capital.investedCost)}（占计划 ${plain(capital.usedPct)}），当前市值 ${money(capital.marketValue)}，浮盈 ${money(capital.floatingPnl)}`
+    )
+    const spare = capital.spareCash ?? 0
+    lines.push(
+      spare >= 0
+        ? `- 剩余闲钱 ${money(spare)}（占计划 ${plain(capital.sparePct)}）；当前总资产（持仓市值+闲钱）${money(capital.totalAsset)}`
+        : `- 剩余闲钱 ${money(spare)}（占计划 ${plain(capital.sparePct)}）——**已超支、无钱可加，不要再建议加仓**`
+    )
+  } else {
+    lines.push('- 未设置「计划投入基金市场金额」，无法计算剩余闲钱（用户可在「持仓」页填写）。')
+  }
+
+  if (position && position.shares > 0) {
+    const f = capital?.funds.find((x) => x.fundCode === position.fundCode) ?? null
+    const shareTag =
+      f && (f.costWeightPct !== null || f.budgetPct !== null)
+        ? `（占已投入本金 ${plain(f.costWeightPct)}、占计划投入 ${plain(f.budgetPct)}）`
+        : ''
+    lines.push(
+      `- 本基金：买入本金 ${money(position.totalCost)}${shareTag}，持有 ${position.shares} 份，成本价 ${money(position.avgCost)}，最新净值 ${money(position.latestNav)}`
+    )
+    lines.push(
+      `  当前市值 ${money(position.marketValue)}，浮动盈亏 ${money(position.floatingPnl)}（收益率 ${signed(position.pnlPct)}）${f ? `，占组合市值 ${plain(f.weightPct)}` : ''}`
+    )
+    lines.push('  加仓金额以上面的"剩余闲钱"为上限；减仓/止盈释放的资金回到闲钱。')
+  } else {
+    lines.push('- 本基金：未录入持仓（无法给出基于成本/盈亏的操作建议）。')
+  }
+
+  return lines.join('\n')
+}
+
 /** buildUserPrompt 的输入（字段渐多，改用对象传参，避免长位置参数顺序错位） */
 export interface PromptInput {
   fundName: string
   code: string
   nav: NavPoint[]
   holdings: { reportDate: string | null; rows: HoldingWithStock[] }
-  news: { title: string | null; summary: string | null; sentiment: string | null; llmTags: string[]; pubTime: Date | null; relevance?: 'match' | 'market' }[]
+  news: {
+    title: string | null
+    summary: string | null
+    sentiment: string | null
+    llmTags: string[]
+    pubTime: Date | null
+    relevance?: 'match' | 'market'
+  }[]
   position: PositionSummary | null
+  /** 用户资金全景（计划投入/已投入本金/剩余闲钱/各基金占比）；无记录时为 null */
+  capital: CapitalSummary | null
   timeCtx: string
   estimate: EstPoint[]
   metricsBlock: string | null
@@ -172,16 +253,39 @@ export interface PromptInput {
 
 /** 拼装 User Prompt（导出供单测：验证指标/组合/持仓/新闻/时点/规则分各块确实进入提示词） */
 export function buildUserPrompt(input: PromptInput): string {
-  const { fundName, code, nav, holdings, news, position, timeCtx, estimate, metricsBlock, portfolioBlock, ruleBlock, valuationBlock } = input
+  const {
+    fundName,
+    code,
+    nav,
+    holdings,
+    news,
+    position,
+    capital,
+    timeCtx,
+    estimate,
+    metricsBlock,
+    portfolioBlock,
+    ruleBlock,
+    valuationBlock
+  } = input
   const latestNav = nav[nav.length - 1]
 
-  const navLines = nav.slice(-30).map((p) => `${p.date} ${p.nav.toFixed(4)} (${p.changePct === null ? '--' : p.changePct.toFixed(2)}%)`).join('\n')
+  const navLines = nav
+    .slice(-30)
+    .map(
+      (p) =>
+        `${p.date} ${p.nav.toFixed(4)} (${p.changePct === null ? '--' : p.changePct.toFixed(2)}%)`
+    )
+    .join('\n')
 
   const estBlock = formatEstimateBlock(estimate)
 
   const holdLines = holdings.rows
     .slice(0, 10)
-    .map((h) => `${h.rank}. ${h.stockName ?? '?'} 权重${h.weight === null ? '--' : h.weight.toFixed(2)}% 近10日${h.lastPct === null ? '--' : h.lastPct.toFixed(2)}%`)
+    .map(
+      (h) =>
+        `${h.rank}. ${h.stockName ?? '?'} 权重${h.weight === null ? '--' : h.weight.toFixed(2)}% 近10日${h.lastPct === null ? '--' : h.lastPct.toFixed(2)}%`
+    )
     .join('\n')
 
   const newsLines = news
@@ -189,7 +293,9 @@ export function buildUserPrompt(input: PromptInput): string {
     .map((n) => {
       // 带发布日与"几天前"：旧实现只给标题，模型无法判断这条新闻是当天的还是三周前的
       const d = n.pubTime
-      const dateTag = d ? `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')}|${newsAgeTag(d)}` : '日期未知'
+      const dateTag = d
+        ? `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')}|${newsAgeTag(d)}`
+        : '日期未知'
       const head = n.title && n.title.trim() !== '' ? n.title : '(无标题)'
       const body = n.summary ? ' | ' + n.summary.slice(0, 100) : ''
       // [行业]=与该基金/重仓股相关；[大盘]=相关新闻不足时的市场环境兜底（不可当成该基金的消息）
@@ -198,19 +304,14 @@ export function buildUserPrompt(input: PromptInput): string {
     })
     .join('\n')
 
-  // 用户持仓（M7 录入 fund_trade 计算而来；无持仓则提示）
-  const posLines =
-    position && position.shares > 0
-      ? `持有 ${position.shares} 份，移动加权平均成本 ${position.avgCost?.toFixed(4)}，
-最新净值 ${position.latestNav?.toFixed(4) ?? '--'}，浮动盈亏 ${position.floatingPnl?.toFixed(2) ?? '--'}（收益率 ${position.pnlPct?.toFixed(2) ?? '--'}%）
-请结合持仓盈亏给出建议：深套时是否止损/补仓、盈利时是否止盈。`
-      : '（未录入持仓，仅基于净值与重仓股判断）'
+  // 用户资金与仓位（M7 录入 fund_trade 计算而来）：买入本金/份额/盈亏 + 计划投入/剩余闲钱/该基金占比
+  const capitalBlock = formatCapitalBlock(capital, position)
 
   return `${timeCtx}
 基金：${fundName}（${code}）
 净值样本数：${nav.length} 条（区间累计涨跌见下方量化指标的"区间收益"）
 最新净值：${latestNav.nav.toFixed(4)}（${latestNav.date}），当日涨跌 ${latestNav.changePct === null ? '--' : latestNav.changePct.toFixed(2)}%
-${estBlock ? estBlock + '\n' : ''}${metricsBlock ? metricsBlock + '\n' : ''}${valuationBlock ? valuationBlock + '\n' : ''}${ruleBlock ? ruleBlock + '\n' : ''}${portfolioBlock ? portfolioBlock + '\n' : ''}${posLines}
+${estBlock ? estBlock + '\n' : ''}${metricsBlock ? metricsBlock + '\n' : ''}${valuationBlock ? valuationBlock + '\n' : ''}${ruleBlock ? ruleBlock + '\n' : ''}${portfolioBlock ? portfolioBlock + '\n' : ''}${capitalBlock}
 
 近 30 日净值：
 ${navLines}
@@ -237,7 +338,11 @@ export interface AnalyzeContext {
  * 组合上下文：该基金在用户组合中的位置（与哪些基金重仓重叠 / 相关性高、是否构成组合级集中度）。
  * 只有一只自选基金、或无重叠无相关性时返回 null（不拼空块）。失败不阻断分析。
  */
-async function loadPortfolioContext(pool: Pool, userId: number, code: string): Promise<string | null> {
+async function loadPortfolioContext(
+  pool: Pool,
+  userId: number,
+  code: string
+): Promise<string | null> {
   try {
     const funds = await listFunds(pool, userId)
     const active = funds.filter((f) => f.isActive === 1)
@@ -267,7 +372,12 @@ async function loadPortfolioContext(pool: Pool, userId: number, code: string): P
 
 /** 单基金 AI 分析主流程；返回 null 表示跳过（未配置 Key / 数据不足 / 解析失败）。
  *  userId：持仓成本按该用户计算（多用户 M9，建议基于各自持仓）；默认 1=guanxin */
-export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: number | null = null, userId = 1): Promise<AnalyzeResult | null> {
+export async function analyzeFund(
+  ctx: AnalyzeContext,
+  code: string,
+  cost: number | null = null,
+  userId = 1
+): Promise<AnalyzeResult | null> {
   const { pool, aiFundPool } = ctx
   if (!hasDeepseekKey()) {
     console.warn(`[analyze] ${code} 跳过：未配置 DeepSeek API Key`)
@@ -307,16 +417,32 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     const pos = await computePosition(pool, userId, code)
     position = pos.shares > 0 ? pos : null
     if (position) {
-      console.log(`[analyze] ${code} 已接入持仓：${position.shares} 份，成本 ${position.avgCost?.toFixed(4)}，盈亏 ${position.floatingPnl?.toFixed(2)}`)
+      console.log(
+        `[analyze] ${code} 已接入持仓：${position.shares} 份，成本 ${position.avgCost?.toFixed(4)}，盈亏 ${position.floatingPnl?.toFixed(2)}`
+      )
     }
+  }
+
+  // 资金全景：计划投入 / 已投入本金 / 剩余闲钱 / 该基金占组合（让 AI 知道"还有多少钱可加"）
+  let capital: CapitalSummary | null = null
+  try {
+    capital = await computeCapitalSummary(pool, userId)
+  } catch (e) {
+    console.warn(`[analyze] ${code} 资金全景计算失败（忽略继续）: ${(e as Error).message}`)
   }
 
   // 相关新闻：基金名关键词 + 前 8 个重仓股名过滤 ai_fund.raw_news。
   // 选材走 recentNewsForFunds（时效优先 + 逐级降级 + 可用性排序），原因见该函数注释：
   // 旧实现按时间倒序取"全库最新 10 条"，实测近 7 天命中常常不足，会把三周前的旧闻当成"最新"。
-  const stockNames = holdings.rows.map((h) => h.stockName).filter((s): s is string => Boolean(s)).slice(0, 8)
+  const stockNames = holdings.rows
+    .map((h) => h.stockName)
+    .filter((s): s is string => Boolean(s))
+    .slice(0, 8)
   const fundKeywords = [basic.name.replace(/[联接A-C0-9]+$/g, '').slice(0, 6)]
-  const news = await recentNewsForFunds(aiFundPool, { tags: [...fundKeywords, ...stockNames], limit: 8 })
+  const news = await recentNewsForFunds(aiFundPool, {
+    tags: [...fundKeywords, ...stockNames],
+    limit: 8
+  })
 
   // 时点上下文：让 AI 区分盘中估算/收盘确认、盘前预判/盘后复盘（日历接口失败则按周末判断兜底）
   let timeCtx = ''
@@ -372,6 +498,7 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     holdings,
     news,
     position,
+    capital,
     timeCtx,
     estimate,
     metricsBlock,
@@ -391,16 +518,33 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     console.error(`[analyze] ${code} LLM 输出解析失败: ${raw.slice(0, 200)}`)
     return null
   }
-  console.log(`[analyze] ${code} ${basic.name} → ${parsed.action}（置信 ${parsed.confidence}）: ${parsed.reason.slice(0, 60)}`)
+  console.log(
+    `[analyze] ${code} ${basic.name} → ${parsed.action}（置信 ${parsed.confidence}）: ${parsed.reason.slice(0, 60)}`
+  )
   return parsed
 }
 
 /** 写 ds_advice（含原始响应留痕）；返回是否新插入。userId：建议归属用户（多用户 M9） */
-export async function saveAdvice(pool: Pool, code: string, r: AnalyzeResult, tradeDate: string, userId = 1): Promise<boolean> {
+export async function saveAdvice(
+  pool: Pool,
+  code: string,
+  r: AnalyzeResult,
+  tradeDate: string,
+  userId = 1
+): Promise<boolean> {
   const res = await pool.query(
     `INSERT INTO ds_advice (fund_code, trade_date, action, reason, confidence, suggested_pct, response_raw, user_id, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())`,
-    [code, tradeDate, r.action, r.reason, r.confidence, r.suggestedPct, JSON.stringify({ raw: r.raw }), userId]
+    [
+      code,
+      tradeDate,
+      r.action,
+      r.reason,
+      r.confidence,
+      r.suggestedPct,
+      JSON.stringify({ raw: r.raw }),
+      userId
+    ]
   )
   return (res.rowCount ?? 0) > 0
 }
@@ -416,7 +560,11 @@ export async function runAnalyzeForFund(
   const pool = createPool(cfg)
   const aiFundPool = createAiFundPool(cfg)
   try {
-    const r = await analyzeFund({ pool, aiFundPool, rulesInLLM: cfg.analyzer.rulesInLLM }, code, cost)
+    const r = await analyzeFund(
+      { pool, aiFundPool, rulesInLLM: cfg.analyzer.rulesInLLM },
+      code,
+      cost
+    )
     if (!r) return { result: null, inserted: false, tradeDate: todayStr() }
     const tradeDate = todayStr()
     const inserted = await saveAdvice(pool, code, r, tradeDate)

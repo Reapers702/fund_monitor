@@ -400,6 +400,150 @@ function formatMetricsBlock(m, rs) {
   }
   return lines.join('\n')
 }
+// ---------- 持仓与资金全景（镜像自 src/main/position/position.ts） ----------
+
+/** 移动加权平均（买入更新成本、卖出计已实现盈亏，卖出超持截断） */
+function computePositionFromTrades(trades) {
+  let shares = 0
+  let cost = 0
+  for (const t of trades) {
+    if (t.tradeType === 'buy') {
+      const newShares = shares + t.shares
+      cost = newShares > 0 ? (shares * cost + t.shares * t.price + t.fee) / newShares : 0
+      shares = newShares
+    } else {
+      shares -= Math.min(t.shares, shares)
+    }
+  }
+  return { shares, avgCost: cost }
+}
+
+/** 当前用户的全部持仓（份额/成本/市值/盈亏） */
+async function loadPositions(userId) {
+  const codes = (
+    await fundPool.query(
+      `SELECT DISTINCT fund_code FROM fund_trade WHERE user_id = $1 ORDER BY fund_code`,
+      [userId]
+    )
+  ).rows
+  const out = []
+  for (const row of codes) {
+    const code = row.fund_code
+    const trades = (
+      await fundPool.query(
+        `SELECT trade_type, shares, price, fee FROM fund_trade WHERE user_id = $1 AND fund_code = $2 ORDER BY trade_date, id`,
+        [userId, code]
+      )
+    ).rows.map((t) => ({
+      tradeType: t.trade_type,
+      shares: Number(t.shares),
+      price: Number(t.price),
+      fee: Number(t.fee)
+    }))
+    const { shares, avgCost } = computePositionFromTrades(trades)
+    const nameRow = (
+      await fundPool.query(`SELECT fund_name FROM fund_basic WHERE fund_code = $1`, [code])
+    ).rows[0]
+    const navRow = (
+      await fundPool.query(
+        `SELECT dwjz FROM fund_nav_daily WHERE fund_code = $1 ORDER BY trade_date DESC LIMIT 1`,
+        [code]
+      )
+    ).rows[0]
+    const latestNav = navRow?.dwjz != null ? Number(navRow.dwjz) : null
+    const marketValue = shares > 0 && latestNav !== null ? shares * latestNav : null
+    const totalCost = shares > 0 ? shares * avgCost : 0
+    const floatingPnl = marketValue !== null ? marketValue - totalCost : null
+    out.push({
+      fundCode: code,
+      fundName: nameRow?.fund_name ?? null,
+      shares: round(shares),
+      avgCost: shares > 0 ? round(avgCost, 4) : null,
+      totalCost: round(totalCost),
+      latestNav,
+      marketValue: marketValue !== null ? round(marketValue) : null,
+      floatingPnl: floatingPnl !== null ? round(floatingPnl) : null,
+      pnlPct:
+        marketValue !== null && totalCost > 0
+          ? round(((marketValue - totalCost) / totalCost) * 100)
+          : null
+    })
+  }
+  return out
+}
+
+/** 资金全景：计划投入/已投入本金/市值/闲钱/各基金占比（闲钱 = 预算 − 已投入本金） */
+async function loadCapital(userId) {
+  const budget = Number(
+    (await fundPool.query(`SELECT market_budget FROM fund_profile WHERE user_id = $1`, [userId]))
+      .rows[0]?.market_budget ?? 0
+  )
+  const positions = await loadPositions(userId)
+  const investedCost = round(positions.reduce((s, p) => s + p.totalCost, 0))
+  const hasValue = positions.some((p) => p.marketValue !== null)
+  const marketValue = round(positions.reduce((s, p) => s + (p.marketValue ?? 0), 0))
+  const withBudget = budget > 0
+  const spareCash = withBudget ? round(budget - investedCost) : null
+  return {
+    marketBudget: round(budget),
+    investedCost,
+    marketValue,
+    floatingPnl: hasValue ? round(marketValue - investedCost) : null,
+    usedPct: withBudget ? round((investedCost / budget) * 100) : null,
+    spareCash,
+    sparePct: spareCash !== null ? round((spareCash / budget) * 100) : null,
+    totalAsset: spareCash !== null ? round(marketValue + spareCash) : null,
+    funds: positions.map((p) => ({
+      ...p,
+      weightPct:
+        marketValue > 0 && p.marketValue !== null
+          ? round((p.marketValue / marketValue) * 100)
+          : null,
+      costWeightPct: investedCost > 0 ? round((p.totalCost / investedCost) * 100) : null,
+      budgetPct: withBudget ? round((p.totalCost / budget) * 100) : null
+    }))
+  }
+}
+
+/** 镜像自 analyze.ts formatCapitalBlock */
+function formatCapitalBlock(capital, position) {
+  const money = (v) => (v === null || v === undefined ? '--' : v.toFixed(2))
+  const signed = (v) =>
+    v === null || v === undefined ? '--' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
+  const plain = (v) => (v === null || v === undefined ? '--' : `${v.toFixed(2)}%`)
+  const lines = ['资金与仓位（用户实盘口径，金额单位：元）：']
+  if (capital && capital.marketBudget > 0) {
+    lines.push(
+      `- 计划投入基金市场 ${money(capital.marketBudget)}；已投入本金 ${money(capital.investedCost)}（占计划 ${plain(capital.usedPct)}），当前市值 ${money(capital.marketValue)}，浮盈 ${money(capital.floatingPnl)}`
+    )
+    const spare = capital.spareCash ?? 0
+    lines.push(
+      spare >= 0
+        ? `- 剩余闲钱 ${money(spare)}（占计划 ${plain(capital.sparePct)}）；当前总资产（持仓市值+闲钱）${money(capital.totalAsset)}`
+        : `- 剩余闲钱 ${money(spare)}（占计划 ${plain(capital.sparePct)}）——**已超支、无钱可加，不要再建议加仓**`
+    )
+  } else {
+    lines.push('- 未设置「计划投入基金市场金额」，无法计算剩余闲钱（用户可在「持仓」页填写）。')
+  }
+  if (position && position.shares > 0) {
+    const f = capital?.funds.find((x) => x.fundCode === position.fundCode) ?? null
+    const shareTag =
+      f && (f.costWeightPct !== null || f.budgetPct !== null)
+        ? `（占已投入本金 ${plain(f.costWeightPct)}、占计划投入 ${plain(f.budgetPct)}）`
+        : ''
+    lines.push(
+      `- 本基金：买入本金 ${money(position.totalCost)}${shareTag}，持有 ${position.shares} 份，成本价 ${money(position.avgCost)}，最新净值 ${money(position.latestNav)}`
+    )
+    lines.push(
+      `  当前市值 ${money(position.marketValue)}，浮动盈亏 ${money(position.floatingPnl)}（收益率 ${signed(position.pnlPct)}）${f ? `，占组合市值 ${plain(f.weightPct)}` : ''}`
+    )
+    lines.push('  加仓金额以上面的"剩余闲钱"为上限；减仓/止盈释放的资金回到闲钱。')
+  } else {
+    lines.push('- 本基金：未录入持仓（无法给出基于成本/盈亏的操作建议）。')
+  }
+  return lines.join('\n')
+}
+
 async function loadFund(code) {
   const basic = (
     await fundPool.query(`SELECT fund_name AS name FROM fund_basic WHERE fund_code = $1`, [code])
@@ -543,8 +687,12 @@ ${picked.map((p) => `${hm(p)} ${pct(p)}`).join('\n')}`
 async function promptSnapshot(codes) {
   const bench = await loadBenchmark()
   const stats = []
+  // 资金与持仓：与 analyze.ts 同一 userId 口径（默认用户 1 = guanxin）
+  const capital = await loadCapital(1)
   for (const code of codes) {
     const { basic, nav, holdings, est, news, tags, valuation } = await loadFund(code)
+    const position = capital.funds.find((p) => p.fundCode === code) ?? null
+    const capitalBlock = formatCapitalBlock(capital, position)
     const fm = computeFundMetrics(nav)
     const rs = bench ? computeRelativeStrength(nav, bench, [20, 60], '沪深300') : null
     const metricsBlock = formatMetricsBlock(fm, rs)
@@ -583,7 +731,7 @@ async function promptSnapshot(codes) {
 净值样本数：${nav.length} 条（区间累计涨跌见下方量化指标的"区间收益"）
 最新净值：${latestNav.nav.toFixed(4)}（${latestNav.date}），当日涨跌 ${latestNav.changePct === null ? '--' : latestNav.changePct.toFixed(2)}%
 ${estBlock ? estBlock + '\n' : ''}${metricsBlock}
-${valuationBlock ? valuationBlock + '\n' : ''}（未录入持仓，仅基于净值与重仓股判断）
+${valuationBlock ? valuationBlock + '\n' : ''}${capitalBlock}
 
 近 30 日净值：
 ${navLines}
@@ -598,6 +746,9 @@ ${newsLines || '（无相关新闻）'}
     console.log(`\n${'='.repeat(88)}\n### ${basic.name}（${code}）`)
     console.log(`过滤关键词：${JSON.stringify(tags)}`)
     console.log(`板块估值：${valuationBlock ?? '（无匹配指数，不注入该块）'}`)
+    console.log(
+      `资金：计划投入 ${capital.marketBudget.toFixed(2)}｜已投入本金 ${capital.investedCost.toFixed(2)}｜市值 ${capital.marketValue.toFixed(2)}｜剩余闲钱 ${capital.spareCash === null ? '未设置预算' : capital.spareCash.toFixed(2)}｜本基金占组合 ${position?.weightPct == null ? '--' : position.weightPct + '%'}`
+    )
     console.log(
       `新闻 ${news.length} 条（行业 ${news.filter((n) => n.relevance !== 'market').length} / 大盘兜底 ${news.filter((n) => n.relevance === 'market').length}），带情绪 ${news.filter((n) => n.sentiment).length}，带摘要 ${news.filter((n) => n.summary).length}`
     )

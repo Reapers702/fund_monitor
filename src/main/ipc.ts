@@ -38,9 +38,24 @@ import { getSchedulerState } from './scheduler'
 import { taskProgressList, isTaskBusy } from './tasks'
 import type { TaskProgress } from './tasks'
 import { runAlertCheck } from './alerts/run'
-import { computePosition, listPositions, listTrades, addTrade, deleteTrade, getProfile, saveProfile } from './position/position'
-import type { TradeRow } from './position/position'
-import { getCurrentUserId, setCurrentUserId, ensureDefaultUser, listUsers, createUser } from './user'
+import {
+  computePosition,
+  listPositions,
+  listTrades,
+  addTrade,
+  deleteTrade,
+  getProfile,
+  saveProfile,
+  computeCapitalSummary
+} from './position/position'
+import type { TradeRow, CapitalSummary } from './position/position'
+import {
+  getCurrentUserId,
+  setCurrentUserId,
+  ensureDefaultUser,
+  listUsers,
+  createUser
+} from './user'
 
 /**
  * 注册主进程 IPC 处理器（渲染进程经 preload 的 window.api 调用）。
@@ -89,9 +104,10 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      const r = await pool.query<{ id: number; name: string }>('SELECT id, name FROM app_user WHERE id = $1', [
-        getCurrentUserId()
-      ])
+      const r = await pool.query<{ id: number; name: string }>(
+        'SELECT id, name FROM app_user WHERE id = $1',
+        [getCurrentUserId()]
+      )
       if (r.rows.length === 0) return { id: 1, name: 'guanxin' }
       return r.rows[0]
     } finally {
@@ -170,11 +186,10 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      await pool.query('UPDATE user_fund SET is_active = $3, updated_at = now() WHERE user_id = $1 AND fund_code = $2', [
-        getCurrentUserId(),
-        code,
-        active ? 1 : 0
-      ])
+      await pool.query(
+        'UPDATE user_fund SET is_active = $3, updated_at = now() WHERE user_id = $1 AND fund_code = $2',
+        [getCurrentUserId(), code, active ? 1 : 0]
+      )
     } finally {
       await pool.end().catch(() => {})
     }
@@ -206,7 +221,9 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
         advice: adviceAll.slice(0, 20),
         adviceReview: evaluateAdviceReviews(adviceAll, navAll),
         metrics: computeFundMetrics(navAll),
-        relativeStrength: benchNav ? computeRelativeStrength(navAll, benchNav, [20, 60], BENCHMARK_NAME) : null,
+        relativeStrength: benchNav
+          ? computeRelativeStrength(navAll, benchNav, [20, 60], BENCHMARK_NAME)
+          : null,
         currentWeightPct: currentWeightPct(positions, code),
         valuation: basic ? await valuationForFund(pool, basic.name) : null,
         // 规则引擎参考分（四轴量化快照；详情页展示用，不驱动建议）——计算失败返回 null
@@ -226,7 +243,12 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     try {
       await ensureSchema(pool)
       const uid = getCurrentUserId()
-      const r = await analyzeFund({ pool, aiFundPool, rulesInLLM: cfg.analyzer.rulesInLLM }, code, null, uid)
+      const r = await analyzeFund(
+        { pool, aiFundPool, rulesInLLM: cfg.analyzer.rulesInLLM },
+        code,
+        null,
+        uid
+      )
       if (!r) return { ok: false, skipped: true, reason: '未配置 Key 或数据不足', advice: null }
       const tradeDate = todayStr()
       const inserted = await saveAdvice(pool, code, r, tradeDate, uid)
@@ -273,7 +295,8 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
       const r = await runAnalyzeAllCore(pool, aiFundPool)
       return { ok: true, error: null, result: r }
     } catch (e) {
-      if (isTaskBusy(e)) console.warn(`[ipc] advice:analyzeAll 忽略重复触发: ${(e as Error).message}`)
+      if (isTaskBusy(e))
+        console.warn(`[ipc] advice:analyzeAll 忽略重复触发: ${(e as Error).message}`)
       else console.error('[ipc] advice:analyzeAll 失败:', (e as Error).message)
       return { ok: false, error: (e as Error).message, result: null }
     } finally {
@@ -332,7 +355,10 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
       const [funds, positions] = await Promise.all([listFunds(pool, uid), listPositions(pool, uid)])
       const active = funds.filter((f) => f.isActive === 1)
       const codes = active.map((f) => f.code)
-      const [holdingsMap, navMap] = await Promise.all([latestHoldingsBatch(pool, codes), navSeriesBatch(pool, codes, 180)])
+      const [holdingsMap, navMap] = await Promise.all([
+        latestHoldingsBatch(pool, codes),
+        navSeriesBatch(pool, codes, 180)
+      ])
       const mvMap = new Map(positions.map((p) => [p.fundCode, p.marketValue]))
       return analyzePortfolio(
         active.map((f) => ({
@@ -378,30 +404,39 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     }
   })
 
-  ipcMain.handle('position:detail', async (_e, code: string): Promise<{ summary: PositionSummary; trades: TradeRow[] }> => {
-    const cfg = loadConfig()
-    const pool = createPool(cfg)
-    try {
-      const uid = getCurrentUserId()
-      const [summary, trades] = await Promise.all([computePosition(pool, uid, code), listTrades(pool, uid, code)])
-      return { summary, trades }
-    } finally {
-      await pool.end().catch(() => {})
+  ipcMain.handle(
+    'position:detail',
+    async (_e, code: string): Promise<{ summary: PositionSummary; trades: TradeRow[] }> => {
+      const cfg = loadConfig()
+      const pool = createPool(cfg)
+      try {
+        const uid = getCurrentUserId()
+        const [summary, trades] = await Promise.all([
+          computePosition(pool, uid, code),
+          listTrades(pool, uid, code)
+        ])
+        return { summary, trades }
+      } finally {
+        await pool.end().catch(() => {})
+      }
     }
-  })
+  )
 
-  ipcMain.handle('position:addTrade', async (_e, t: TradeInput): Promise<{ id: number; summary: PositionSummary }> => {
-    const cfg = loadConfig()
-    const pool = createPool(cfg)
-    try {
-      const uid = getCurrentUserId()
-      const id = await addTrade(pool, uid, t)
-      const summary = await computePosition(pool, uid, t.fundCode)
-      return { id, summary }
-    } finally {
-      await pool.end().catch(() => {})
+  ipcMain.handle(
+    'position:addTrade',
+    async (_e, t: TradeInput): Promise<{ id: number; summary: PositionSummary }> => {
+      const cfg = loadConfig()
+      const pool = createPool(cfg)
+      try {
+        const uid = getCurrentUserId()
+        const id = await addTrade(pool, uid, t)
+        const summary = await computePosition(pool, uid, t.fundCode)
+        return { id, summary }
+      } finally {
+        await pool.end().catch(() => {})
+      }
     }
-  })
+  )
 
   ipcMain.handle('position:deleteTrade', async (_e, id: number): Promise<boolean> => {
     const cfg = loadConfig()
@@ -413,20 +448,43 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
     }
   })
 
-  ipcMain.handle('position:profile', async (_e, patch?: { buyFeePct?: number; sellFeePct?: number }): Promise<FundProfile> => {
+  // 资金全景：计划投入 / 已投入本金 / 当前市值 / 剩余闲钱 / 各基金占比（持仓页顶部「资金概览」用）
+  ipcMain.handle('position:capital', async (): Promise<CapitalSummary> => {
     const cfg = loadConfig()
     const pool = createPool(cfg)
     try {
-      const uid = getCurrentUserId()
-      if (patch) {
-        const cur = await getProfile(pool, uid)
-        await saveProfile(pool, uid, { buyFeePct: patch.buyFeePct ?? cur.buyFeePct, sellFeePct: patch.sellFeePct ?? cur.sellFeePct })
-      }
-      return await getProfile(pool, uid)
+      return await computeCapitalSummary(pool, getCurrentUserId())
     } finally {
       await pool.end().catch(() => {})
     }
   })
+
+  ipcMain.handle(
+    'position:profile',
+    async (
+      _e,
+      patch?: { buyFeePct?: number; sellFeePct?: number; marketBudget?: number }
+    ): Promise<FundProfile> => {
+      const cfg = loadConfig()
+      const pool = createPool(cfg)
+      try {
+        const uid = getCurrentUserId()
+        if (patch) {
+          const cur = await getProfile(pool, uid)
+          await saveProfile(pool, uid, {
+            buyFeePct: patch.buyFeePct ?? cur.buyFeePct,
+            sellFeePct: patch.sellFeePct ?? cur.sellFeePct,
+            // 负数没有意义（预算下限 0）；未传则保留原值
+            marketBudget:
+              patch.marketBudget !== undefined ? Math.max(0, patch.marketBudget) : cur.marketBudget
+          })
+        }
+        return await getProfile(pool, uid)
+      } finally {
+        await pool.end().catch(() => {})
+      }
+    }
+  )
 
   // 手动触发提醒检查（设置页"立即检查提醒"）：盘中(估值异动) + 盘后(净值/估值失真/止盈止损/负面新闻) 两轮都跑，
   // 与 CLI --alerts 一致；同一天同类已推过的不重复推（alert_log 去重）
@@ -479,7 +537,12 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
       byHost: stats.byHost.map((d) => ({ ...d })),
       recent: stats.recent,
       failures: stats.failures,
-      limiter: { active: limiter.active, queued: limiter.queued, maxConcurrent: limiter.maxConcurrent, minGapMs: limiter.minGapMs },
+      limiter: {
+        active: limiter.active,
+        queued: limiter.queued,
+        maxConcurrent: limiter.maxConcurrent,
+        minGapMs: limiter.minGapMs
+      },
       channel: getFetchChannel(),
       push2: push2Status(),
       benchmark: benchmarkStatus(),

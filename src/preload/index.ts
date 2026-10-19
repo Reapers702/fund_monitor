@@ -6,7 +6,8 @@ const api: FundApi = {
   ping: (): Promise<string> => ipcRenderer.invoke('app:ping'),
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getAppInfo'),
   getAutoLaunch: (): Promise<boolean> => ipcRenderer.invoke('app:getAutoLaunch'),
-  setAutoLaunch: (enabled: boolean): Promise<boolean> => ipcRenderer.invoke('app:setAutoLaunch', enabled),
+  setAutoLaunch: (enabled: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('app:setAutoLaunch', enabled),
   userGetCurrent: (): Promise<CurrentUser> => ipcRenderer.invoke('user:getCurrent'),
   userList: (): Promise<AppUserRow[]> => ipcRenderer.invoke('user:list'),
   userCreate: (name: string): Promise<CurrentUser> => ipcRenderer.invoke('user:create', name),
@@ -14,12 +15,16 @@ const api: FundApi = {
 
   fundsList: (): Promise<FundCard[]> => ipcRenderer.invoke('funds:list'),
   fundsAdd: (code: string): Promise<FundSyncResult> => ipcRenderer.invoke('funds:add', code),
-  fundsToggle: (code: string, active: boolean): Promise<void> => ipcRenderer.invoke('funds:toggle', code, active),
+  fundsToggle: (code: string, active: boolean): Promise<void> =>
+    ipcRenderer.invoke('funds:toggle', code, active),
   estimateGuide: (): Promise<EstimateGuideFund[]> => ipcRenderer.invoke('estimate:guide'),
-  estimateDiff: (days?: number): Promise<EstimateDiffStat[]> => ipcRenderer.invoke('estimate:diff', days ?? 20),
+  estimateDiff: (days?: number): Promise<EstimateDiffStat[]> =>
+    ipcRenderer.invoke('estimate:diff', days ?? 20),
 
-  fundDetail: (code: string, days = 120): Promise<FundDetail> => ipcRenderer.invoke('fund:detail', code, days),
-  adviceAnalyze: (code: string): Promise<AdviceRunResult> => ipcRenderer.invoke('advice:analyze', code),
+  fundDetail: (code: string, days = 120): Promise<FundDetail> =>
+    ipcRenderer.invoke('fund:detail', code, days),
+  adviceAnalyze: (code: string): Promise<AdviceRunResult> =>
+    ipcRenderer.invoke('advice:analyze', code),
   quotesRun: (): Promise<QuotesRunResult> => ipcRenderer.invoke('quotes:run'),
   adviceAnalyzeAll: (): Promise<AnalyzeAllRunResult> => ipcRenderer.invoke('advice:analyzeAll'),
 
@@ -28,20 +33,27 @@ const api: FundApi = {
     ipcRenderer.invoke('position:detail', code),
   positionAddTrade: (t: TradeInput): Promise<{ id: number; summary: PositionSummary }> =>
     ipcRenderer.invoke('position:addTrade', t),
-  positionDeleteTrade: (id: number): Promise<boolean> => ipcRenderer.invoke('position:deleteTrade', id),
-  positionProfile: (patch?: { buyFeePct?: number; sellFeePct?: number }): Promise<FundProfile> =>
-    ipcRenderer.invoke('position:profile', patch),
+  positionDeleteTrade: (id: number): Promise<boolean> =>
+    ipcRenderer.invoke('position:deleteTrade', id),
+  positionProfile: (patch?: {
+    buyFeePct?: number
+    sellFeePct?: number
+    marketBudget?: number
+  }): Promise<FundProfile> => ipcRenderer.invoke('position:profile', patch),
+  positionCapital: (): Promise<CapitalSummary> => ipcRenderer.invoke('position:capital'),
   portfolioAnalysis: (): Promise<PortfolioAnalysis> => ipcRenderer.invoke('portfolio:analysis'),
 
   newsRecent: (limit?: number): Promise<NewsRow[]> => ipcRenderer.invoke('news:recent', limit),
 
   configGet: (): Promise<AppConfig> => ipcRenderer.invoke('config:get'),
-  configSave: (patch: Record<string, unknown>): Promise<AppConfig> => ipcRenderer.invoke('config:save', patch),
+  configSave: (patch: Record<string, unknown>): Promise<AppConfig> =>
+    ipcRenderer.invoke('config:save', patch),
   schedulerStatus: (): Promise<SchedulerStatus> => ipcRenderer.invoke('scheduler:status'),
   alertsRun: (): Promise<AlertRunResult> => ipcRenderer.invoke('alerts:run'),
   crawlStats: (): Promise<CrawlStats> => ipcRenderer.invoke('crawl:stats'),
   taskStatus: (): Promise<TaskProgress[]> => ipcRenderer.invoke('task:status'),
-  logsRecent: (limit?: number): Promise<LogsPayload> => ipcRenderer.invoke('logs:recent', limit ?? 300),
+  logsRecent: (limit?: number): Promise<LogsPayload> =>
+    ipcRenderer.invoke('logs:recent', limit ?? 300),
   logsOpenDir: (): Promise<string> => ipcRenderer.invoke('logs:openDir')
 }
 

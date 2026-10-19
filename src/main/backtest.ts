@@ -14,7 +14,12 @@
 import type { Pool } from 'pg'
 import { computeFundMetrics, computeRelativeStrength, formatMetricsBlock } from './analyzer/metrics'
 import type { NavLike } from './analyzer/metrics'
-import { SYSTEM_PROMPT, buildUserPrompt, buildTimeContext, formatTimeContext } from './analyzer/analyze'
+import {
+  SYSTEM_PROMPT,
+  buildUserPrompt,
+  buildTimeContext,
+  formatTimeContext
+} from './analyzer/analyze'
 import { parseAdvice } from './analyzer/parse'
 import { chatComplete, hasDeepseekKey } from './llm/deepseek'
 import { loadConfig } from './config'
@@ -51,7 +56,11 @@ async function navUpTo(pool: Pool, code: string, asof: string, limit: number): P
   )
   return r.rows
     .reverse()
-    .map((x) => ({ date: dateOnly(x.trade_date), nav: Number(x.dwjz), changePct: x.jzzzl === null ? null : Number(x.jzzzl) }))
+    .map((x) => ({
+      date: dateOnly(x.trade_date),
+      nav: Number(x.dwjz),
+      changePct: x.jzzzl === null ? null : Number(x.jzzzl)
+    }))
 }
 
 /** 完整升序净值日期（评估未来窗口用） */
@@ -74,8 +83,18 @@ async function basic(pool: Pool, code: string): Promise<{ name: string } | null>
 }
 
 /** 季度持仓：报告期 <= asof 的最新一期；每只重仓股近10日(<=asof)表现 */
-async function holdingsUpTo(pool: Pool, code: string, asof: string): Promise<{ reportDate: string | null; rows: HoldingWithStock[] }> {
-  const r = await pool.query<{ report_date: Date; rank: number; stock_code: string | null; stock_name: string | null; weight: string | null }>(
+async function holdingsUpTo(
+  pool: Pool,
+  code: string,
+  asof: string
+): Promise<{ reportDate: string | null; rows: HoldingWithStock[] }> {
+  const r = await pool.query<{
+    report_date: Date
+    rank: number
+    stock_code: string | null
+    stock_name: string | null
+    weight: string | null
+  }>(
     `SELECT report_date, rank, stock_code, stock_name, weight FROM fund_holdings
      WHERE fund_code = $1 AND report_date = (SELECT max(report_date) FROM fund_holdings WHERE fund_code = $1 AND report_date <= $2)
      ORDER BY rank`,
@@ -86,7 +105,15 @@ async function holdingsUpTo(pool: Pool, code: string, asof: string): Promise<{ r
   const rows: HoldingWithStock[] = []
   for (const row of r.rows) {
     if (!row.stock_code) {
-      rows.push({ rank: row.rank, stockCode: null, stockName: row.stock_name, weight: row.weight === null ? null : Number(row.weight), lastClose: null, lastPct: null, klineCount: 0 })
+      rows.push({
+        rank: row.rank,
+        stockCode: null,
+        stockName: row.stock_name,
+        weight: row.weight === null ? null : Number(row.weight),
+        lastClose: null,
+        lastPct: null,
+        klineCount: 0
+      })
       continue
     }
     const k = await pool.query<{ close: string }>(
@@ -95,7 +122,10 @@ async function holdingsUpTo(pool: Pool, code: string, asof: string): Promise<{ r
     )
     const closes = k.rows.map((x) => Number(x.close))
     const klineCount = closes.length
-    const lastPct = klineCount >= 2 && closes[0] !== 0 ? ((closes[0] - closes[closes.length - 1]) / closes[closes.length - 1]) * 100 : null
+    const lastPct =
+      klineCount >= 2 && closes[0] !== 0
+        ? ((closes[0] - closes[closes.length - 1]) / closes[closes.length - 1]) * 100
+        : null
     rows.push({
       rank: row.rank,
       stockCode: row.stock_code,
@@ -110,10 +140,29 @@ async function holdingsUpTo(pool: Pool, code: string, asof: string): Promise<{ r
 }
 
 /** 相关新闻：截至 asof 当日 15:40（模拟当时 15:35 分析可见的全部当日新闻，含盘中） */
-async function newsUpTo(pool: Pool, tags: string[], asof: string, limit = 10): Promise<{ title: string | null; summary: string | null; sentiment: string | null; llmTags: string[]; pubTime: Date | null }[]> {
+async function newsUpTo(
+  pool: Pool,
+  tags: string[],
+  asof: string,
+  limit = 10
+): Promise<
+  {
+    title: string | null
+    summary: string | null
+    sentiment: string | null
+    llmTags: string[]
+    pubTime: Date | null
+  }[]
+> {
   if (tags.length === 0) return []
   const asofAt = new Date(asof + 'T15:40:00')
-  const r = await pool.query<{ title: string | null; summary: string | null; sentiment: string | null; llm_tags: string | null; pub_time: Date | null }>(
+  const r = await pool.query<{
+    title: string | null
+    summary: string | null
+    sentiment: string | null
+    llm_tags: string | null
+    pub_time: Date | null
+  }>(
     `SELECT title, summary, sentiment, llm_tags::text AS llm_tags, pub_time FROM raw_news
      WHERE (llm_tags ?| $1 OR tags ?| $1 OR title ILIKE ANY ($2)) AND pub_time <= $3
      ORDER BY pub_time DESC LIMIT $4`,
@@ -124,14 +173,26 @@ async function newsUpTo(pool: Pool, tags: string[], asof: string, limit = 10): P
     summary: x.summary,
     sentiment: x.sentiment,
     pubTime: x.pub_time,
-    llmTags: (() => { try { const a = JSON.parse(x.llm_tags ?? '[]'); return Array.isArray(a) ? a.map(String) : [] } catch { return [] } })()
+    llmTags: (() => {
+      try {
+        const a = JSON.parse(x.llm_tags ?? '[]')
+        return Array.isArray(a) ? a.map(String) : []
+      } catch {
+        return []
+      }
+    })()
   }))
 }
 
 // ---------- 采样日选择 ----------
 
 /** 在过去 recentDays 自然日内、所有基金均有净值、且每只其后至少留有 horizon+1 个净值日的日期里均匀抽 count 个 */
-function pickSampleDates(funds: Map<string, { date: string; nav: number }[]>, recentDays: number, count: number, horizon = 5): string[] {
+function pickSampleDates(
+  funds: Map<string, { date: string; nav: number }[]>,
+  recentDays: number,
+  count: number,
+  horizon = 5
+): string[] {
   const today = todayISO()
   const floor = addDays(today, -recentDays)
   // 每一只基金 "在该日有净值 && 其后至少 horizon 个净值日"
@@ -148,14 +209,16 @@ function pickSampleDates(funds: Map<string, { date: string; nav: number }[]>, re
     }
   }
   // 只保留所有基金都满足的日期
-  const ok = [...dateSet.keys()].filter((d) => {
-    for (const [, seq] of funds) {
-      const seqDates = new Set(seq.map((p) => p.date))
-      const i = seq.findIndex((p) => p.date === d)
-      if (i < 0 || !seqDates.has(d) || i + horizon >= seq.length) return false
-    }
-    return true
-  }).sort()
+  const ok = [...dateSet.keys()]
+    .filter((d) => {
+      for (const [, seq] of funds) {
+        const seqDates = new Set(seq.map((p) => p.date))
+        const i = seq.findIndex((p) => p.date === d)
+        if (i < 0 || !seqDates.has(d) || i + horizon >= seq.length) return false
+      }
+      return true
+    })
+    .sort()
   if (ok.length === 0) return []
   const take = Math.min(count, ok.length)
   if (take >= ok.length) return ok
@@ -176,10 +239,19 @@ interface Decision {
   suggestedPct: number | null
 }
 
-async function decide(ctx: { pool: Pool; aiFundPool: Pool }, code: string, name: string, asof: string, benchByDate: Map<string, number> | null): Promise<Decision> {
+async function decide(
+  ctx: { pool: Pool; aiFundPool: Pool },
+  code: string,
+  name: string,
+  asof: string,
+  benchByDate: Map<string, number> | null
+): Promise<Decision> {
   const nav = await navUpTo(ctx.pool, code, asof, 120)
   const holdings = await holdingsUpTo(ctx.pool, code, asof)
-  const stockNames = holdings.rows.map((h) => h.stockName).filter((s): s is string => Boolean(s)).slice(0, 8)
+  const stockNames = holdings.rows
+    .map((h) => h.stockName)
+    .filter((s): s is string => Boolean(s))
+    .slice(0, 8)
   const fundKeywords = [name.replace(/[联接A-C0-9]+$/g, '').slice(0, 6)]
   const news = await newsUpTo(ctx.aiFundPool, [...fundKeywords, ...stockNames], asof, 10)
 
@@ -192,7 +264,10 @@ async function decide(ctx: { pool: Pool; aiFundPool: Pool }, code: string, name:
     const fundMetrics = computeFundMetrics(nav)
     let bench: NavLike[] | null = null
     if (benchByDate) {
-      bench = [...benchByDate.entries()].filter(([d]) => d <= asof).sort().map(([date, nav0]) => ({ date, nav: nav0 }))
+      bench = [...benchByDate.entries()]
+        .filter(([d]) => d <= asof)
+        .sort()
+        .map(([date, nav0]) => ({ date, nav: nav0 }))
     }
     const rs = bench ? computeRelativeStrength(nav, bench, [20, 60], BENCHMARK_NAME) : null
     metricsBlock = formatMetricsBlock(fundMetrics, rs)
@@ -207,6 +282,7 @@ async function decide(ctx: { pool: Pool; aiFundPool: Pool }, code: string, name:
     holdings,
     news,
     position: null, // 回测口径：不带持仓，避免把现在才有的持仓当成当时信息
+    capital: null, // 回测口径：资金计划（预算/闲钱）是"当前"状态，历史采样日不存在，注入即穿越
     timeCtx,
     estimate: [] as EstPoint[], // 库中无对应采样日的历史盘中估值（盘后视角）
     metricsBlock,
@@ -226,12 +302,24 @@ async function decide(ctx: { pool: Pool; aiFundPool: Pool }, code: string, name:
   )
   const parsed = parseAdvice(raw)
   if (!parsed) throw new Error(`LLM 解析失败: ${raw.slice(0, 150)}`)
-  return { code, name, asof, action: parsed.action, confidence: parsed.confidence, reason: parsed.reason, suggestedPct: parsed.suggestedPct }
+  return {
+    code,
+    name,
+    asof,
+    action: parsed.action,
+    confidence: parsed.confidence,
+    reason: parsed.reason,
+    suggestedPct: parsed.suggestedPct
+  }
 }
 
 // ---------- 主流程 ----------
 
-export async function runBacktest(codesOverride?: string[], count = 5, recentDays = 30): Promise<number> {
+export async function runBacktest(
+  codesOverride?: string[],
+  count = 5,
+  recentDays = 30
+): Promise<number> {
   if (!hasDeepseekKey()) {
     console.error('未配置 DeepSeek API Key，无法评估（.env: DEEPSEEK_API_KEY）')
     return 2
@@ -256,15 +344,24 @@ export async function runBacktest(codesOverride?: string[], count = 5, recentDay
     const names = new Map<string, string>()
     for (const code of codes) {
       const [b, seq] = await Promise.all([basic(pool, code), navDatesAll(pool, code)])
-      if (!b) { console.error(`[backtest] ${code} 无 fund_basic，跳过`); continue }
+      if (!b) {
+        console.error(`[backtest] ${code} 无 fund_basic，跳过`)
+        continue
+      }
       navMaps.set(code, seq)
       names.set(code, b.name)
     }
     const evalCodes = [...navMaps.keys()]
-    if (evalCodes.length === 0) { console.error('没有可评估的基金'); return 1 }
+    if (evalCodes.length === 0) {
+      console.error('没有可评估的基金')
+      return 1
+    }
 
     const sampleDates = pickSampleDates(navMaps, recentDays, count)
-    if (sampleDates.length === 0) { console.error('过去30天没有满足未来窗口的采样日'); return 1 }
+    if (sampleDates.length === 0) {
+      console.error('过去30天没有满足未来窗口的采样日')
+      return 1
+    }
 
     // 基准沪深300（相对超额用）
     const benchNav = await loadBenchmarkNav()
@@ -277,12 +374,22 @@ export async function runBacktest(codesOverride?: string[], count = 5, recentDay
     console.log('基准入场 = T 日收盘净值；T+1/T+5 = 之后第 1/5 个交易日净值相对 T 的涨跌。')
     console.log(`采样日（${sampleDates.length} 个交易日）: ${sampleDates.join(', ')}`)
     console.log(`相对基准：${BENCHMARK_NAME} 同期涨跌（超额 = 基金 − 基准）。`)
-    console.log('判定：加仓(add) 期望后续涨、减仓(reduce) 期望后续跌（上调仓方向正确）；持有(hold) 中性不计方向。')
-    console.log('-' .repeat(100))
+    console.log(
+      '判定：加仓(add) 期望后续涨、减仓(reduce) 期望后续跌（上调仓方向正确）；持有(hold) 中性不计方向。'
+    )
+    console.log('-'.repeat(100))
 
     interface Row {
-      code: string; name: string; asof: string; action: string; conf: number; reason: string
-      ret1: number | null; ret5: number | null; bench5: number | null; excess5: number | null
+      code: string
+      name: string
+      asof: string
+      action: string
+      conf: number
+      reason: string
+      ret1: number | null
+      ret5: number | null
+      bench5: number | null
+      excess5: number | null
       hit5: boolean | null
     }
     const rows: Row[] = []
@@ -307,11 +414,32 @@ export async function runBacktest(codesOverride?: string[], count = 5, recentDay
             if (b && b5 !== undefined && b > 0) bench5 = ((b5 - b) / b) * 100
           }
           const excess5 = ret5 !== null && bench5 !== null ? ret5 - bench5 : null
-          const hit5 = d.action === 'add' ? (ret5 !== null ? ret5 > 0 : null)
-            : d.action === 'reduce' ? (ret5 !== null ? ret5 < 0 : null)
-            : null
-          rows.push({ code, name: names.get(code)!, asof, action: d.action, conf: d.confidence, reason: d.reason, ret1, ret5, bench5, excess5, hit5 })
-          console.log(`[${asof}] ${code} ${names.get(code)} → ${CN[d.action]}（置信 ${d.confidence}）T+1=${ret1 === null ? '--' : ret1.toFixed(2) + '%'} | T+5=${ret5 === null ? '--' : ret5.toFixed(2) + '%'}（基准 ${bench5 === null ? '--' : bench5.toFixed(2) + '%'}，超额 ${excess5 === null ? '--' : excess5.toFixed(2) + '%'}）`)
+          const hit5 =
+            d.action === 'add'
+              ? ret5 !== null
+                ? ret5 > 0
+                : null
+              : d.action === 'reduce'
+                ? ret5 !== null
+                  ? ret5 < 0
+                  : null
+                : null
+          rows.push({
+            code,
+            name: names.get(code)!,
+            asof,
+            action: d.action,
+            conf: d.confidence,
+            reason: d.reason,
+            ret1,
+            ret5,
+            bench5,
+            excess5,
+            hit5
+          })
+          console.log(
+            `[${asof}] ${code} ${names.get(code)} → ${CN[d.action]}（置信 ${d.confidence}）T+1=${ret1 === null ? '--' : ret1.toFixed(2) + '%'} | T+5=${ret5 === null ? '--' : ret5.toFixed(2) + '%'}（基准 ${bench5 === null ? '--' : bench5.toFixed(2) + '%'}，超额 ${excess5 === null ? '--' : excess5.toFixed(2) + '%'}）`
+          )
           console.log(`       ${d.reason}`)
         } catch (e) {
           console.error(`  [${asof}] ${code} 评估失败: ${(e as Error).message}`)
@@ -323,14 +451,18 @@ export async function runBacktest(codesOverride?: string[], count = 5, recentDay
     console.log('\n' + '='.repeat(100))
     console.log('汇总评估')
     console.log('='.repeat(100))
-    if (rows.length === 0) { console.log('没有产生任何样本（可能 DeepSeek 调用全部失败）'); return 1 }
+    if (rows.length === 0) {
+      console.log('没有产生任何样本（可能 DeepSeek 调用全部失败）')
+      return 1
+    }
 
     const avg = (arr: (number | null)[]) => {
       const v = arr.filter((x): x is number => x !== null)
       if (v.length === 0) return null
       return v.reduce((a, b) => a + b, 0) / v.length
     }
-    const pctArr = (arr: (number | null)[]) => arr.map((x) => x === null ? '--' : `${x >= 0 ? '+' : ''}${x.toFixed(2)}%`).join(' / ')
+    const pctArr = (arr: (number | null)[]) =>
+      arr.map((x) => (x === null ? '--' : `${x >= 0 ? '+' : ''}${x.toFixed(2)}%`)).join(' / ')
 
     const byAction = (a: string) => rows.filter((r) => r.action === a)
     for (const a of ['add', 'reduce', 'hold']) {
@@ -338,36 +470,57 @@ export async function runBacktest(codesOverride?: string[], count = 5, recentDay
       if (grp.length === 0) continue
       const hit = grp.filter((r) => r.hit5 === true).length
       const totalDir = grp.filter((r) => r.hit5 !== null).length
-      console.log(`\n[${CN[a]}] ${grp.length} 次${grp.length > 1 ? '（方向命中率 ' + (totalDir ? Math.round((hit / totalDir) * 100) : '--') + '%）' : ''}`)
-      console.log(`  平均 T+1 = ${avg(grp.map((r) => r.ret1)) === null ? '--' : (avg(grp.map((r) => r.ret1)) as number).toFixed(2) + '%'}`)
-      console.log(`  平均 T+5 = ${avg(grp.map((r) => r.ret5)) === null ? '--' : (avg(grp.map((r) => r.ret5)) as number).toFixed(2) + '%'}  平均超额(T+5) = ${avg(grp.map((r) => r.excess5)) === null ? '--' : (avg(grp.map((r) => r.excess5)) as number).toFixed(2) + '%'}`)
-      console.log(`  明细：${grp.map((r) => `${r.asof.slice(5)}:${r.ret5 === null ? '--' : r.ret5.toFixed(2) + '%'}`).join('  ')}`)
+      console.log(
+        `\n[${CN[a]}] ${grp.length} 次${grp.length > 1 ? '（方向命中率 ' + (totalDir ? Math.round((hit / totalDir) * 100) : '--') + '%）' : ''}`
+      )
+      console.log(
+        `  平均 T+1 = ${avg(grp.map((r) => r.ret1)) === null ? '--' : (avg(grp.map((r) => r.ret1)) as number).toFixed(2) + '%'}`
+      )
+      console.log(
+        `  平均 T+5 = ${avg(grp.map((r) => r.ret5)) === null ? '--' : (avg(grp.map((r) => r.ret5)) as number).toFixed(2) + '%'}  平均超额(T+5) = ${avg(grp.map((r) => r.excess5)) === null ? '--' : (avg(grp.map((r) => r.excess5)) as number).toFixed(2) + '%'}`
+      )
+      console.log(
+        `  明细：${grp.map((r) => `${r.asof.slice(5)}:${r.ret5 === null ? '--' : r.ret5.toFixed(2) + '%'}`).join('  ')}`
+      )
     }
 
     const dir = rows.filter((r) => r.hit5 !== null)
     const dirHit = dir.filter((r) => r.hit5 === true)
-    console.log(`\n整体方向命中率（add 后涨 / reduce 后跌，T+5）：${dir.length ? Math.round((dirHit.length / dir.length) * 100) + '%' : '--'}（${dirHit.length}/${dir.length}）`)
+    console.log(
+      `\n整体方向命中率（add 后涨 / reduce 后跌，T+5）：${dir.length ? Math.round((dirHit.length / dir.length) * 100) + '%' : '--'}（${dirHit.length}/${dir.length}）`
+    )
 
     // 置信度分层：高置信(>=70) vs 低置信的方向命中率，看置信度是否真的更准
     const hi = dir.filter((r) => r.conf >= 70)
     const lo = dir.filter((r) => r.conf < 70)
-    const hitRate = (g: Row[]) => (g.length ? Math.round((g.filter((r) => r.hit5 === true).length / g.length) * 100) : null)
-    console.log(`置信度分层（T+5 方向命中率）：高置信(≥70) ${hitRate(hi) === null ? '--' : hitRate(hi) + '%'}（${hi.filter((r) => r.hit5 === true).length}/${hi.length}）｜低置信(<70) ${hitRate(lo) === null ? '--' : hitRate(lo) + '%'}（${lo.filter((r) => r.hit5 === true).length}/${lo.length}）`)
+    const hitRate = (g: Row[]) =>
+      g.length ? Math.round((g.filter((r) => r.hit5 === true).length / g.length) * 100) : null
+    console.log(
+      `置信度分层（T+5 方向命中率）：高置信(≥70) ${hitRate(hi) === null ? '--' : hitRate(hi) + '%'}（${hi.filter((r) => r.hit5 === true).length}/${hi.length}）｜低置信(<70) ${hitRate(lo) === null ? '--' : hitRate(lo) + '%'}（${lo.filter((r) => r.hit5 === true).length}/${lo.length}）`
+    )
 
     // 每只基金维度
     console.log('\n按基金：')
     for (const code of evalCodes) {
       const g = rows.filter((r) => r.code === code)
       if (g.length === 0) continue
-      console.log(`  ${code} ${names.get(code)}：${CN[g[0].action]}×${byAction(g[0].action).filter((r) => r.code === code).length}｜平均 T+5 = ${avg(g.map((r) => r.ret5)) === null ? '--' : (avg(g.map((r) => r.ret5)) as number).toFixed(2) + '%'}｜超额 = ${avg(g.map((r) => r.excess5)) === null ? '--' : (avg(g.map((r) => r.excess5)) as number).toFixed(2) + '%'}`)
+      console.log(
+        `  ${code} ${names.get(code)}：${CN[g[0].action]}×${byAction(g[0].action).filter((r) => r.code === code).length}｜平均 T+5 = ${avg(g.map((r) => r.ret5)) === null ? '--' : (avg(g.map((r) => r.ret5)) as number).toFixed(2) + '%'}｜超额 = ${avg(g.map((r) => r.excess5)) === null ? '--' : (avg(g.map((r) => r.excess5)) as number).toFixed(2) + '%'}`
+      )
     }
 
     // 样本明细全表
     console.log('\n完整样本（asof | 基金 | 建议 | 置信 | T+1 | T+5 | 基准T+5 | 超额T+5）：')
     for (const r of rows) {
-      console.log(`  ${r.asof} | ${r.code} ${r.name} | ${CN[r.action]} | ${r.conf} | ${pctArr([r.ret1])} | ${pctArr([r.ret5])} | ${pctArr([r.bench5])} | ${pctArr([r.excess5])}`)
+      console.log(
+        `  ${r.asof} | ${r.code} ${r.name} | ${CN[r.action]} | ${r.conf} | ${pctArr([r.ret1])} | ${pctArr([r.ret5])} | ${pctArr([r.bench5])} | ${pctArr([r.excess5])}`
+      )
     }
-    console.log('\n[结论] 上方汇总仅描述建议与后续真实走势的统计关系，不构成投资建议；样本小（每基金' + sampleDates.length + '日），参考时注意置信区间。')
+    console.log(
+      '\n[结论] 上方汇总仅描述建议与后续真实走势的统计关系，不构成投资建议；样本小（每基金' +
+        sampleDates.length +
+        '日），参考时注意置信区间。'
+    )
     return 0
   } finally {
     await pool.end().catch(() => {})

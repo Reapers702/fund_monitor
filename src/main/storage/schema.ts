@@ -135,10 +135,15 @@ export const SCHEMA_STATEMENTS: string[] = [
       PRIMARY KEY (user_id, fund_code)
   )`,
 
+  // 费率与资金计划（按用户）：
+  //   market_budget = 该用户计划投入基金市场的总金额（元，0 = 未设置）。
+  //   有了它才能把"已投入本金/当前市值"与"还剩多少闲钱"放在同一口径下，
+  //   供 UI 展示并写进 AI prompt（见 position/position.ts computeCapitalSummary）。
   `CREATE TABLE IF NOT EXISTS fund_profile (
-      user_id      INT PRIMARY KEY,
-      buy_fee_pct  NUMERIC(6,4) NOT NULL DEFAULT 0,
-      sell_fee_pct NUMERIC(6,4) NOT NULL DEFAULT 0
+      user_id       INT PRIMARY KEY,
+      buy_fee_pct   NUMERIC(6,4) NOT NULL DEFAULT 0,
+      sell_fee_pct  NUMERIC(6,4) NOT NULL DEFAULT 0,
+      market_budget NUMERIC(14,2) NOT NULL DEFAULT 0
   )`,
 
   // 提醒去重：同一用户同一基金的同类提醒每天只推一次（插入冲突即表示已推过）。
@@ -212,14 +217,18 @@ export const MIGRATION_STATEMENTS: string[] = [
         AND NOT EXISTS (SELECT 1 FROM information_schema.columns
                         WHERE table_name = 'fund_profile' AND column_name = 'user_id') THEN
        CREATE TABLE fund_profile_v2 (
-         user_id      INT PRIMARY KEY,
-         buy_fee_pct  NUMERIC(6,4) NOT NULL DEFAULT 0,
-         sell_fee_pct NUMERIC(6,4) NOT NULL DEFAULT 0
+         user_id       INT PRIMARY KEY,
+         buy_fee_pct   NUMERIC(6,4) NOT NULL DEFAULT 0,
+         sell_fee_pct  NUMERIC(6,4) NOT NULL DEFAULT 0,
+         market_budget NUMERIC(14,2) NOT NULL DEFAULT 0
        );
        INSERT INTO fund_profile_v2 (user_id, buy_fee_pct, sell_fee_pct)
          SELECT 1, buy_fee_pct, sell_fee_pct FROM fund_profile;
        DROP TABLE fund_profile;
        ALTER TABLE fund_profile_v2 RENAME TO fund_profile;
      END IF;
-   END $$`
+   END $$`,
+
+  // 基金市场计划投入总额（老库补列；0 = 未设置）
+  `ALTER TABLE fund_profile ADD COLUMN IF NOT EXISTS market_budget NUMERIC(14,2) NOT NULL DEFAULT 0`
 ]

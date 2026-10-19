@@ -337,6 +337,43 @@ interface TradeInput {
 interface FundProfile {
   buyFeePct: number
   sellFeePct: number
+  /** 计划投入基金市场的总金额（元）；0 = 未设置 */
+  marketBudget: number
+}
+
+/** 单只基金在用户资金计划中的位置（position:capital 返回） */
+interface CapitalFundPosition {
+  fundCode: string
+  fundName: string | null
+  shares: number
+  avgCost: number | null
+  /** 买入本金 = 当前持有份额的成本（含费用） */
+  investedCost: number
+  marketValue: number | null
+  floatingPnl: number | null
+  pnlPct: number | null
+  /** 占组合市值 % */
+  weightPct: number | null
+  /** 占已投入本金 % */
+  costWeightPct: number | null
+  /** 占计划投入总额 %（未设预算时为 null） */
+  budgetPct: number | null
+}
+
+/**
+ * 用户资金全景（position:capital 返回）。
+ * 闲钱口径 = 计划投入 − 已投入本金（现金流口径）；负数表示已超支。
+ */
+interface CapitalSummary {
+  marketBudget: number
+  investedCost: number
+  marketValue: number
+  floatingPnl: number | null
+  usedPct: number | null
+  spareCash: number | null
+  sparePct: number | null
+  totalAsset: number | null
+  funds: CapitalFundPosition[]
 }
 
 // 后台调度器状态（scheduler:status 返回）
@@ -393,7 +430,12 @@ interface PortfolioOverlapPair {
   fundB: { code: string; name: string }
   commonCount: number
   overlapPct: number // 重叠度 %：共同持股 min 权重和 / 较小基金权重合计
-  commonStocks: { stockCode: string | null; stockName: string | null; weightA: number; weightB: number }[]
+  commonStocks: {
+    stockCode: string | null
+    stockName: string | null
+    weightA: number
+    weightB: number
+  }[]
 }
 
 interface PortfolioFundCorrelation {
@@ -527,7 +569,12 @@ interface FundApi {
   positionDetail: (code: string) => Promise<{ summary: PositionSummary; trades: TradeRow[] }>
   positionAddTrade: (t: TradeInput) => Promise<{ id: number; summary: PositionSummary }>
   positionDeleteTrade: (id: number) => Promise<boolean>
-  positionProfile: (patch?: { buyFeePct?: number; sellFeePct?: number }) => Promise<FundProfile>
+  positionProfile: (patch?: {
+    buyFeePct?: number
+    sellFeePct?: number
+    marketBudget?: number
+  }) => Promise<FundProfile>
+  positionCapital: () => Promise<CapitalSummary>
   portfolioAnalysis: () => Promise<PortfolioAnalysis>
   newsRecent: (limit?: number) => Promise<NewsRow[]>
   configGet: () => Promise<AppConfig>

@@ -1,14 +1,35 @@
 /**
  * prompt 组装行为验证（直接执行 tests/prompt.test.ts 的断言集，但用 esbuild 打包真实 analyze.ts）。
  *
- * 为什么单独存在：DSH 沙箱内 vitest / esbuild 无法启动原生子进程（spawn EPERM），
- * 因此沙箱里跑不了单测。本脚本在普通 shell 里可跑，用来快速核对"各数据块是否按预期进入 prompt"。
+ * 为什么单独存在：受限沙箱（workspace-write）内 vitest / esbuild 起不了原生子进程（spawn EPERM），
+ * 跑不了单测。本脚本在可 spawn 的环境里能跑，用来核对"各数据块是否按预期进入 prompt"。
  * 常规单测仍以 `npm test`（tests/prompt.test.ts）为准，本脚本是补充手段。
+ *
+ * electron 被 stub 掉：analyze.ts 的依赖链（config/pageFetcher 等）会 import electron，
+ * 而这里只需要纯函数组装 prompt，不需要真实 Electron 运行时。
  *
  * 用法：node scripts/verify-prompt-blocks.mjs   （需可用的 esbuild，退出码 0=全部通过）
  */
 import { build } from 'esbuild'
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, mkdirSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+// 生成 electron stub（放 .tmp-verify/，已被 .gitignore 忽略）
+mkdirSync('.tmp-verify', { recursive: true })
+const stubPath = resolve('.tmp-verify/electron-stub.mjs')
+writeFileSync(
+  stubPath,
+  `export const app = { getPath: () => '.', getVersion: () => '0.0.0', isPackaged: false, on: () => {}, whenReady: async () => {} }
+export const BrowserWindow = class { static getAllWindows() { return [] } }
+export const shell = { openPath: async () => '', openExternal: async () => {} }
+export const ipcMain = { handle: () => {}, on: () => {} }
+export const Notification = class { static isSupported() { return false } show() {} }
+export const Tray = class {}
+export const Menu = { buildFromTemplate: () => ({}), setApplicationMenu: () => {} }
+export const nativeImage = { createFromPath: () => ({}) }
+export default { app, BrowserWindow, shell, ipcMain, Notification, Tray, Menu, nativeImage }
+`
+)
 
 const out = await build({
   entryPoints: ['src/main/analyzer/analyze.ts'],
@@ -16,7 +37,8 @@ const out = await build({
   platform: 'node',
   format: 'esm',
   target: 'node20',
-  external: ['pg', 'electron'],
+  external: ['pg'],
+  alias: { electron: stubPath },
   outfile: '.tmp-verify/analyze.mjs',
   logLevel: 'error'
 })
@@ -81,6 +103,31 @@ const position = {
   floatingPnl: -120,
   pnlPct: -7.5
 }
+const capital = {
+  marketBudget: 100000,
+  investedCost: 45000,
+  marketValue: 47800,
+  floatingPnl: 2800,
+  usedPct: 45,
+  spareCash: 55000,
+  sparePct: 55,
+  totalAsset: 102800,
+  funds: [
+    {
+      fundCode: '012322',
+      fundName: '东财云计算指数增强C',
+      shares: 1000,
+      avgCost: 1.6,
+      investedCost: 1600,
+      marketValue: 1480,
+      floatingPnl: -120,
+      pnlPct: -7.5,
+      weightPct: 3.1,
+      costWeightPct: 3.56,
+      budgetPct: 1.6
+    }
+  ]
+}
 function todayEstimate() {
   const d = new Date()
   const p = (n) => String(n).padStart(2, '0')
@@ -98,6 +145,7 @@ function buildPrompt(o = {}) {
     holdings,
     news,
     position: o.position === undefined ? position : o.position,
+    capital: o.capital === undefined ? capital : o.capital,
     timeCtx: '分析时点：2026-08-19（周三，交易日，盘后）。最新净值截至 2026-08-18。',
     estimate: o.estimate ?? todayEstimate(),
     metricsBlock:
@@ -159,8 +207,8 @@ want(
 // 本次新增断言
 want('新闻块标题', p.includes('相关新闻（最多 8 条'))
 want('新闻归属标签 [行业]', p.includes('[行业]['))
-want('新闻时效标签(positive)', /- \[行业\]\[(今天|昨天|\d+天前)\|positive\]/.test(p))
-want('新闻时效标签(negative)', /- \[行业\]\[(今天|昨天|\d+天前)\|negative\]/.test(p))
+want('新闻时效标签(positive)', /- \[行业\]\[\d{1,2}-\d{2}\|(今天|昨天|\d+天前)\|positive\]/.test(p))
+want('新闻时效标签(negative)', /- \[行业\]\[\d{1,2}-\d{2}\|(今天|昨天|\d+天前)\|negative\]/.test(p))
 want(
   '估值块进入',
   buildPrompt({
@@ -183,6 +231,47 @@ want(
     SYSTEM_PROMPT.includes('距今天数越大参考价值越低')
 )
 
+// 资金与仓位块（本次新增能力）
+want(
+  '资金与仓位块进入（本金/闲钱/三个占比）',
+  p.includes('资金与仓位（用户实盘口径') &&
+    p.includes('计划投入基金市场 100000.00') &&
+    p.includes('已投入本金 45000.00（占计划 45.00%）') &&
+    p.includes('剩余闲钱 55000.00（占计划 55.00%）') &&
+    p.includes('买入本金 1600.00（占已投入本金 3.56%、占计划投入 1.60%）') &&
+    p.includes('占组合市值 3.10%')
+)
+want(
+  '未设预算时不编造闲钱',
+  buildPrompt({
+    capital: {
+      ...capital,
+      marketBudget: 0,
+      usedPct: null,
+      spareCash: null,
+      sparePct: null,
+      totalAsset: null
+    }
+  }).includes('未设置「计划投入基金市场金额」')
+)
+want(
+  '已超支时提示不要再加仓',
+  buildPrompt({
+    capital: {
+      ...capital,
+      investedCost: 110000,
+      usedPct: 110,
+      spareCash: -10000,
+      sparePct: -10,
+      totalAsset: 37800
+    }
+  }).includes('已超支')
+)
+want(
+  'SYSTEM_PROMPT 资金约束',
+  SYSTEM_PROMPT.includes('剩余闲钱') && SYSTEM_PROMPT.includes('已超支）时只考虑持有或减仓')
+)
+
 // [大盘] 标记（relevance='market'）
 const pMarket = buildUserPrompt({
   fundName: '某宽基联接',
@@ -200,6 +289,7 @@ const pMarket = buildUserPrompt({
     }
   ],
   position: null,
+  capital: null,
   timeCtx: '分析时点：2026-08-19',
   estimate: [],
   metricsBlock: null,

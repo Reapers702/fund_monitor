@@ -1,17 +1,34 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, h } from 'vue'
 import {
-  NCard, NTable, NTag, NButton, NInput, NInputNumber, NSelect, NDatePicker,
-  NSpace, NEmpty, NForm, NFormItem, NAlert, useMessage
+  NCard,
+  NTable,
+  NTag,
+  NButton,
+  NInput,
+  NInputNumber,
+  NSelect,
+  NDatePicker,
+  NSpace,
+  NEmpty,
+  NForm,
+  NFormItem,
+  NAlert,
+  NProgress,
+  useMessage
 } from 'naive-ui'
 
 const message = useMessage()
 const positions = ref<PositionSummary[]>([])
 const tradesByFund = ref<Record<string, TradeRow[]>>({})
 const loading = ref(true)
-const profile = ref<FundProfile>({ buyFeePct: 0, sellFeePct: 0 })
+const profile = ref<FundProfile>({ buyFeePct: 0, sellFeePct: 0, marketBudget: 0 })
 /** 组合视角（跨基金重仓股重叠/集中度/相关性）；由 main/portfolio/portfolio.ts 计算 */
 const portfolio = ref<PortfolioAnalysis | null>(null)
+/** 资金计划与闲钱（main/position/position.ts computeCapitalSummary） */
+const capital = ref<CapitalSummary | null>(null)
+/** 「计划投入基金市场」输入框（null = 未设置，避免显示 0 造成误解） */
+const budgetInput = ref<number | null>(null)
 /** 集中度提示阈值（与 main/portfolio/portfolio.ts 的 CONCENTRATION_WARN_PCT 保持一致） */
 const CONCENTRATION_WARN_PCT = 10
 
@@ -44,6 +61,9 @@ async function load(): Promise<void> {
   try {
     positions.value = await window.api.positionList()
     profile.value = await window.api.positionProfile()
+    // 资金计划：预算 + 已投入 + 闲钱（闲钱 = 预算 − 已投入本金，见 computeCapitalSummary）
+    capital.value = await window.api.positionCapital()
+    budgetInput.value = capital.value.marketBudget > 0 ? capital.value.marketBudget : null
     const funds = await window.api.fundsList()
     formFunds.value = funds
       .filter((f) => f.isActive === 1)
@@ -71,7 +91,9 @@ async function load(): Promise<void> {
 const totalValue = computed(() => positions.value.reduce((s, p) => s + (p.marketValue ?? 0), 0))
 const totalCost = computed(() => positions.value.reduce((s, p) => s + p.totalCost, 0))
 const totalPnl = computed(() => totalValue.value - totalCost.value)
-const totalPnlPct = computed(() => (totalCost.value > 0 ? ((totalValue.value - totalCost.value) / totalCost.value) * 100 : null))
+const totalPnlPct = computed(() =>
+  totalCost.value > 0 ? ((totalValue.value - totalCost.value) / totalCost.value) * 100 : null
+)
 
 function fmtMoney(v: number | null): string {
   if (v === null) return '--'
@@ -80,6 +102,16 @@ function fmtMoney(v: number | null): string {
 function fmtPct(v: number | null): string {
   if (v === null) return '--'
   return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
+}
+/** 占比展示不带正负号（仓位占比用它，盈亏率用 fmtPct） */
+function fmtPctPlain(v: number | null | undefined): string {
+  if (v === null || v === undefined) return '--'
+  return `${v.toFixed(2)}%`
+}
+/** 该基金占组合市值 %（资金全景提供，与组合视角同一口径） */
+function fundWeight(code: string): string {
+  const f = capital.value?.funds.find((x) => x.fundCode === code)
+  return fmtPctPlain(f?.weightPct)
 }
 function fmtTime(iso: string): string {
   const d = new Date(iso)
@@ -116,7 +148,9 @@ async function submit(): Promise<void> {
       shares: form.value.shares,
       price: form.value.price,
       fee: form.value.fee ?? 0,
-      tradeDate: form.value.rawDate ? new Date(form.value.rawDate).toISOString() : new Date().toISOString(),
+      tradeDate: form.value.rawDate
+        ? new Date(form.value.rawDate).toISOString()
+        : new Date().toISOString(),
       note: form.value.note || null
     }
     await window.api.positionAddTrade(payload)
@@ -141,10 +175,26 @@ async function removeTrade(id: number): Promise<void> {
 
 async function saveProfile(): Promise<void> {
   try {
-    await window.api.positionProfile({ buyFeePct: profile.value.buyFeePct, sellFeePct: profile.value.sellFeePct })
+    await window.api.positionProfile({
+      buyFeePct: profile.value.buyFeePct,
+      sellFeePct: profile.value.sellFeePct
+    })
     message.success('费率已保存')
   } catch (e) {
     message.error(`保存费率失败: ${(e as Error).message}`)
+  }
+}
+
+/** 保存「计划投入基金市场」金额并立刻重算闲钱（填 0 = 清除设置） */
+async function saveBudget(): Promise<void> {
+  const v = Math.max(0, budgetInput.value ?? 0)
+  try {
+    await window.api.positionProfile({ marketBudget: v })
+    capital.value = await window.api.positionCapital()
+    budgetInput.value = capital.value.marketBudget > 0 ? capital.value.marketBudget : null
+    message.success(v > 0 ? '计划投入已保存，闲钱已重算' : '已清除计划投入')
+  } catch (e) {
+    message.error(`保存计划投入失败: ${(e as Error).message}`)
   }
 }
 
@@ -153,6 +203,75 @@ onMounted(load)
 
 <template>
   <div class="position-view">
+    <n-card title="资金计划" class="card">
+      <template #header-extra>
+        <span class="muted-line">闲钱 = 计划投入 − 已投入本金；AI 建议加仓时会受此约束</span>
+      </template>
+
+      <div class="plan-row">
+        <span class="plan-label">计划投入基金市场</span>
+        <n-input-number
+          v-model:value="budgetInput"
+          :min="0"
+          :step="1000"
+          :show-button="false"
+          placeholder="如 100000"
+          class="plan-input"
+        />
+        <span class="plan-unit">元</span>
+        <n-button size="small" type="primary" secondary @click="saveBudget">保存</n-button>
+      </div>
+
+      <template v-if="capital && capital.marketBudget > 0">
+        <div class="totals">
+          <div class="total-item">
+            <div class="total-label">计划投入</div>
+            <div class="total-value">{{ fmtMoney(capital.marketBudget) }}</div>
+          </div>
+          <div class="total-item">
+            <div class="total-label">已投入本金</div>
+            <div class="total-value">{{ fmtMoney(capital.investedCost) }}</div>
+          </div>
+          <div class="total-item">
+            <div class="total-label">当前市值</div>
+            <div class="total-value">{{ fmtMoney(capital.marketValue) }}</div>
+          </div>
+          <div class="total-item">
+            <div class="total-label">剩余闲钱</div>
+            <div class="total-value" :class="pctClass(capital.spareCash)">
+              {{ fmtMoney(capital.spareCash) }}
+            </div>
+          </div>
+          <div class="total-item">
+            <div class="total-label">总资产（市值+闲钱）</div>
+            <div class="total-value">{{ fmtMoney(capital.totalAsset) }}</div>
+          </div>
+        </div>
+
+        <n-progress
+          type="line"
+          :percentage="Math.min(100, Math.max(0, capital.usedPct ?? 0))"
+          :height="14"
+          :border-radius="4"
+          :fill-color="capital.spareCash !== null && capital.spareCash < 0 ? '#e5484d' : undefined"
+        />
+
+        <n-alert
+          v-if="capital.spareCash !== null && capital.spareCash < 0"
+          type="warning"
+          :bordered="false"
+          class="portfolio-alert"
+        >
+          已超支 {{ fmtMoney(Math.abs(capital.spareCash)) }} 元：计划资金已全部投入，AI
+          建议不会再出现加仓。
+        </n-alert>
+      </template>
+      <p v-else class="muted-line">
+        未设置计划投入金额。填写后，本页会按已录入的持仓自动算出剩余闲钱，并把这个资金约束一并交给
+        AI ——避免出现"建议加仓但你没有钱"的建议。
+      </p>
+    </n-card>
+
     <n-card title="持仓汇总" class="card">
       <div class="totals">
         <div class="total-item">
@@ -173,7 +292,10 @@ onMounted(load)
         </div>
       </div>
 
-      <n-empty v-if="positions.length === 0" description="还没有持仓记录，点击下方「录入交易」开始" />
+      <n-empty
+        v-if="positions.length === 0"
+        description="还没有持仓记录，点击下方「录入交易」开始"
+      />
 
       <n-table v-else size="small" :bordered="false">
         <thead>
@@ -183,6 +305,7 @@ onMounted(load)
             <th>平均成本</th>
             <th>最新净值</th>
             <th>市值</th>
+            <th>占组合</th>
             <th>浮动盈亏</th>
             <th>收益率</th>
             <th>已实现盈亏</th>
@@ -198,6 +321,7 @@ onMounted(load)
             <td>{{ p.avgCost === null ? '--' : p.avgCost.toFixed(4) }}</td>
             <td>{{ p.latestNav === null ? '--' : p.latestNav.toFixed(4) }}</td>
             <td>{{ fmtMoney(p.marketValue) }}</td>
+            <td>{{ fundWeight(p.fundCode) }}</td>
             <td :class="pctClass(p.floatingPnl)">{{ fmtMoney(p.floatingPnl) }}</td>
             <td :class="pctClass(p.pnlPct)">{{ fmtPct(p.pnlPct) }}</td>
             <td :class="pctClass(p.realizedPnl)">{{ fmtMoney(p.realizedPnl) }}</td>
@@ -216,7 +340,10 @@ onMounted(load)
         </n-space>
       </template>
 
-      <n-empty v-if="!portfolio || portfolio.fundCount === 0" description="暂无自选基金，先在「我的基金」添加" />
+      <n-empty
+        v-if="!portfolio || portfolio.fundCount === 0"
+        description="暂无自选基金，先在「我的基金」添加"
+      />
       <template v-else>
         <div class="totals">
           <div class="total-item">
@@ -241,13 +368,23 @@ onMounted(load)
           </div>
         </div>
 
-        <n-alert v-if="highStocks.length > 0" type="warning" :bordered="false" class="portfolio-alert">
-          隐性集中度：{{ highStocks.map((s) => `${s.stockName ?? s.key} ${s.exposure.toFixed(1)}%`).join('、') }}
-          ——单只股票在组合内合计暴露已达 {{ CONCENTRATION_WARN_PCT }}% 以上，多只基金很可能买的是同一批股票。
+        <n-alert
+          v-if="highStocks.length > 0"
+          type="warning"
+          :bordered="false"
+          class="portfolio-alert"
+        >
+          隐性集中度：{{
+            highStocks.map((s) => `${s.stockName ?? s.key} ${s.exposure.toFixed(1)}%`).join('、')
+          }}
+          ——单只股票在组合内合计暴露已达 {{ CONCENTRATION_WARN_PCT }}%
+          以上，多只基金很可能买的是同一批股票。
         </n-alert>
 
         <div class="sub-title">重仓股组合暴露（Top {{ portfolio.topStocks.length }}）</div>
-        <p v-if="portfolio.topStocks.length === 0" class="muted-line">暂无重仓股数据（基金季报持仓未采集）</p>
+        <p v-if="portfolio.topStocks.length === 0" class="muted-line">
+          暂无重仓股数据（基金季报持仓未采集）
+        </p>
         <n-table v-else size="small" :bordered="false">
           <thead>
             <tr>
@@ -266,14 +403,18 @@ onMounted(load)
               <td :class="s.high ? 'risk-high' : ''">{{ s.exposure.toFixed(2) }}%</td>
               <td>{{ s.fundCount }}</td>
               <td class="chips">
-                <span v-for="f in s.funds" :key="f.code" class="chip">{{ f.name }} {{ f.contribution.toFixed(2) }}%</span>
+                <span v-for="f in s.funds" :key="f.code" class="chip"
+                  >{{ f.name }} {{ f.contribution.toFixed(2) }}%</span
+                >
               </td>
             </tr>
           </tbody>
         </n-table>
 
         <div class="sub-title">重仓股重叠（{{ portfolio.overlaps.length }} 对）</div>
-        <p v-if="portfolio.overlaps.length === 0" class="muted-line">未发现共同重仓股（或持仓数据不足）</p>
+        <p v-if="portfolio.overlaps.length === 0" class="muted-line">
+          未发现共同重仓股（或持仓数据不足）
+        </p>
         <n-table v-else size="small" :bordered="false">
           <thead>
             <tr>
@@ -291,8 +432,14 @@ onMounted(load)
                 {{ o.overlapPct.toFixed(1) }}%
               </td>
               <td class="chips">
-                <span v-for="c in o.commonStocks" :key="c.stockCode ?? c.stockName ?? ''" class="chip">
-                  {{ c.stockName ?? c.stockCode }}（{{ c.weightA.toFixed(1) }}/{{ c.weightB.toFixed(1) }}%）
+                <span
+                  v-for="c in o.commonStocks"
+                  :key="c.stockCode ?? c.stockName ?? ''"
+                  class="chip"
+                >
+                  {{ c.stockName ?? c.stockCode }}（{{ c.weightA.toFixed(1) }}/{{
+                    c.weightB.toFixed(1)
+                  }}%）
                 </span>
               </td>
             </tr>
@@ -300,7 +447,9 @@ onMounted(load)
         </n-table>
 
         <div class="sub-title">基金相关性（日收益，需 ≥ 20 个共同交易日）</div>
-        <p v-if="portfolio.correlations.length === 0" class="muted-line">共同交易日不足，暂无法计算</p>
+        <p v-if="portfolio.correlations.length === 0" class="muted-line">
+          共同交易日不足，暂无法计算
+        </p>
         <n-table v-else size="small" :bordered="false">
           <thead>
             <tr>
@@ -320,7 +469,8 @@ onMounted(load)
 
         <p class="portfolio-hint">
           暴露 = Σ（基金组合权重 × 该股在基金内权重），仅统计前十大重仓股，故合计暴露通常低于 100%。
-          重叠度 = 共同持股 min 权重和 ÷ 较小基金权重合计，越高说明两只基金持仓越像。相关系数 ≥ 0.8 表示同涨同跌严重、分散效果有限。
+          重叠度 = 共同持股 min 权重和 ÷ 较小基金权重合计，越高说明两只基金持仓越像。相关系数 ≥ 0.8
+          表示同涨同跌严重、分散效果有限。
         </p>
       </template>
     </n-card>
@@ -336,7 +486,12 @@ onMounted(load)
       </template>
 
       <div v-if="showForm" class="trade-form">
-        <n-form label-placement="left" label-width="90" :show-feedback="false" class="trade-form-inner">
+        <n-form
+          label-placement="left"
+          label-width="90"
+          :show-feedback="false"
+          class="trade-form-inner"
+        >
           <n-form-item label="基金">
             <n-select
               v-model:value="form.fundCode"
@@ -360,19 +515,41 @@ onMounted(load)
             />
           </n-form-item>
           <n-form-item label="份额">
-            <n-input-number v-model:value="form.shares" :min="0" :precision="2" placeholder="如 1000.00" class="f-field" />
+            <n-input-number
+              v-model:value="form.shares"
+              :min="0"
+              :precision="2"
+              placeholder="如 1000.00"
+              class="f-field"
+            />
           </n-form-item>
           <n-form-item label="成交净值">
-            <n-input-number v-model:value="form.price" :min="0" :precision="4" placeholder="如 1.8500" class="f-field" />
+            <n-input-number
+              v-model:value="form.price"
+              :min="0"
+              :precision="4"
+              placeholder="如 1.8500"
+              class="f-field"
+            />
           </n-form-item>
           <n-form-item label="手续费">
-            <n-input-number v-model:value="form.fee" :min="0" :precision="2" placeholder="如 1.50，可填 0" class="f-field" />
+            <n-input-number
+              v-model:value="form.fee"
+              :min="0"
+              :precision="2"
+              placeholder="如 1.50，可填 0"
+              class="f-field"
+            />
           </n-form-item>
           <n-form-item label="交易时间">
             <n-date-picker v-model:value="form.rawDate" type="datetime" class="f-field" />
           </n-form-item>
           <n-form-item label="备注">
-            <n-input v-model:value="form.note" placeholder="可选，如：定投 / 止盈" class="f-field" />
+            <n-input
+              v-model:value="form.note"
+              placeholder="可选，如：定投 / 止盈"
+              class="f-field"
+            />
           </n-form-item>
         </n-form>
         <div class="trade-form-foot">
@@ -380,7 +557,8 @@ onMounted(load)
           <n-button @click="showForm = false">取消</n-button>
         </div>
         <n-alert type="info" :bordered="false" class="trade-form-tip">
-          份额 = 买入/卖出的基金份数；成交净值 = 交易当日的基金单位净值。买入按份额×净值+手续费计入成本，卖出按（净值−平均成本）×份额−手续费计已实现盈亏。
+          份额 = 买入/卖出的基金份数；成交净值 =
+          交易当日的基金单位净值。买入按份额×净值+手续费计入成本，卖出按（净值−平均成本）×份额−手续费计已实现盈亏。
         </n-alert>
       </div>
 
@@ -404,10 +582,14 @@ onMounted(load)
               </tr>
             </thead>
             <tbody>
-              <tr v-for="t in (tradesByFund[p.fundCode] ?? [])" :key="t.id">
+              <tr v-for="t in tradesByFund[p.fundCode] ?? []" :key="t.id">
                 <td>{{ fmtTime(t.tradeDate) }}</td>
                 <td>
-                  <n-tag size="tiny" :type="t.tradeType === 'buy' ? 'success' : 'warning'" :bordered="false">
+                  <n-tag
+                    size="tiny"
+                    :type="t.tradeType === 'buy' ? 'success' : 'warning'"
+                    :bordered="false"
+                  >
                     {{ t.tradeType === 'buy' ? '买入' : '卖出' }}
                   </n-tag>
                 </td>
@@ -428,9 +610,19 @@ onMounted(load)
     <n-card title="费率设置" class="card">
       <n-space align="center">
         <span>买入费率 %</span>
-        <n-input-number v-model:value="profile.buyFeePct" :min="0" :precision="4" style="width: 120px" />
+        <n-input-number
+          v-model:value="profile.buyFeePct"
+          :min="0"
+          :precision="4"
+          style="width: 120px"
+        />
         <span>卖出费率 %</span>
-        <n-input-number v-model:value="profile.sellFeePct" :min="0" :precision="4" style="width: 120px" />
+        <n-input-number
+          v-model:value="profile.sellFeePct"
+          :min="0"
+          :precision="4"
+          style="width: 120px"
+        />
         <n-button @click="saveProfile">保存</n-button>
       </n-space>
     </n-card>
@@ -496,6 +688,29 @@ onMounted(load)
 .muted-line {
   margin: 0;
   font-size: 12px;
+  color: var(--text-color-3);
+}
+
+/* ---------- 资金计划 ---------- */
+
+.plan-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.plan-label {
+  font-size: 13px;
+  color: var(--text-color-2);
+}
+
+.plan-input {
+  width: 170px;
+}
+
+.plan-unit {
+  font-size: 13px;
   color: var(--text-color-3);
 }
 
