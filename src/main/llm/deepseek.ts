@@ -56,7 +56,9 @@ export async function chatComplete(messages: ChatMessage[], opts: ChatOptions = 
   const cfg = loadConfig()
   if (!cfg.deepseek.apiKey) throw new DeepseekError('未配置 DeepSeek API Key')
   const base = cfg.deepseek.baseUrl.replace(/\/+$/, '')
-  const temperature = opts.temperature ?? 0.3
+  // 默认 0：本项目全部是决策类调用（买卖建议/回测），需要可复现而非多样性。
+  // 实测 0.3 下同一份数据重复调用会给出不同建议（见 scripts/ab-prompt-compare.mjs）。
+  const temperature = opts.temperature ?? 0
   const maxTokens = opts.maxTokens ?? 1200
   // enable_thinking=false：关闭思考链。思考型模型（deepseek-flash 等）会先输出 reasoning_content，
   // 且其长度不定、与 max_tokens 共用额度，长 prompt 下极易吃满导致 content 为空（finish_reason=length）

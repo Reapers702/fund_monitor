@@ -22,7 +22,7 @@
 import { Pool } from 'pg'
 import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const envFile = join(root, '.env')
@@ -53,8 +53,8 @@ const poolOf = (database) =>
     port: Number(env.PG_PORT),
     database
   })
-const fundPool = poolOf(env.PG_DB || 'fund_monitor')
-const newsPool = poolOf(env.AI_FUND_DB || 'ai_fund')
+export const fundPool = poolOf(env.PG_DB || 'fund_monitor')
+export const newsPool = poolOf(env.AI_FUND_DB || 'ai_fund')
 
 async function show(label, sql, params = []) {
   console.log(`\n===== ${label} =====`)
@@ -176,13 +176,13 @@ async function hitRates() {
 }
 
 // ---------- 3. 真实 prompt 快照（镜像 analyze.ts / metrics.ts） ----------
-function fundNameKeyword(name) {
+export function fundNameKeyword(name) {
   // 镜像自 analyze.ts：去尾缀后取前 6 字作为基金主题关键词
   return name.replace(/[联接A-C0-9]+$/g, '').slice(0, 6)
 }
 
 /** 镜像自 analyze.ts newsAgeTag */
-function newsAgeTag(pubTime) {
+export function newsAgeTag(pubTime) {
   const days = Math.max(0, Math.floor((Date.now() - pubTime.getTime()) / 86400000))
   if (days === 0) return '今天'
   if (days === 1) return '昨天'
@@ -242,7 +242,7 @@ const THEME_INDEX = [
   ['创业板', '创业板'],
   ['科创', '科创50']
 ]
-async function loadIndexValuation(fundName) {
+export async function loadIndexValuation(fundName) {
   const hit = THEME_INDEX.find(([kw]) => fundName.includes(kw))
   if (!hit) return null
   const r = await fundPool.query(
@@ -263,13 +263,13 @@ async function loadIndexValuation(fundName) {
     evaType: row.eva_type
   }
 }
-function describePercentile(p) {
+export function describePercentile(p) {
   if (p === null || !Number.isFinite(p)) return '--'
   const pct = p * 100
   const tag = pct < 20 ? '偏低' : pct < 50 ? '中低' : pct < 80 ? '中高' : '偏高'
   return `${pct.toFixed(1)}%（${tag}）`
 }
-function formatValuationBlock(v) {
+export function formatValuationBlock(v) {
   const parts = [
     `PE 分位 ${describePercentile(v.pePercentile)}`,
     `PB 分位 ${describePercentile(v.pbPercentile)}`
@@ -281,7 +281,7 @@ function formatValuationBlock(v) {
     : ''
   return `板块估值分位（${v.indexName}，截至 ${v.asof ?? '--'}${eva}）：${parts.join('｜')}`
 }
-const round = (v, d = 2) => {
+export const round = (v, d = 2) => {
   const f = 10 ** d
   return Math.round(v * f) / f
 }
@@ -320,7 +320,7 @@ function dailyReturns(navs) {
   }
   return out
 }
-function computeFundMetrics(nav) {
+export function computeFundMetrics(nav) {
   const points = [...nav]
     .filter((p) => Number.isFinite(p.nav) && p.nav > 0)
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
@@ -360,7 +360,7 @@ function computeFundMetrics(nav) {
     aboveMa20: ma20 !== null && last !== null ? last >= ma20 : null
   }
 }
-function computeRelativeStrength(fund, bench, windows, benchmark) {
+export function computeRelativeStrength(fund, bench, windows, benchmark) {
   const fm = new Map(fund.filter((p) => Number.isFinite(p.nav)).map((p) => [p.date, p.nav]))
   const bm = new Map(bench.filter((p) => Number.isFinite(p.nav)).map((p) => [p.date, p.nav]))
   const common = [...fm.keys()].filter((d) => bm.has(d)).sort()
@@ -380,7 +380,7 @@ function computeRelativeStrength(fund, bench, windows, benchmark) {
   })
   return { benchmark, commonDays: common.length, windows: out }
 }
-function formatMetricsBlock(m, rs) {
+export function formatMetricsBlock(m, rs) {
   const pct = (v) => (v === null ? '--' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`)
   const lines = [
     `量化指标（基于近 ${m.sampleDays} 个交易日净值，年化按 244 交易日）：`,
@@ -403,7 +403,7 @@ function formatMetricsBlock(m, rs) {
 // ---------- 持仓与资金全景（镜像自 src/main/position/position.ts） ----------
 
 /** 移动加权平均（买入更新成本、卖出计已实现盈亏，卖出超持截断） */
-function computePositionFromTrades(trades) {
+export function computePositionFromTrades(trades) {
   let shares = 0
   let cost = 0
   for (const t of trades) {
@@ -419,7 +419,7 @@ function computePositionFromTrades(trades) {
 }
 
 /** 当前用户的全部持仓（份额/成本/市值/盈亏） */
-async function loadPositions(userId) {
+export async function loadPositions(userId) {
   const codes = (
     await fundPool.query(
       `SELECT DISTINCT fund_code FROM fund_trade WHERE user_id = $1 ORDER BY fund_code`,
@@ -473,7 +473,7 @@ async function loadPositions(userId) {
 }
 
 /** 资金全景：计划投入/已投入本金/市值/闲钱/各基金占比（闲钱 = 预算 − 已投入本金） */
-async function loadCapital(userId) {
+export async function loadCapital(userId) {
   const budget = Number(
     (await fundPool.query(`SELECT market_budget FROM fund_profile WHERE user_id = $1`, [userId]))
       .rows[0]?.market_budget ?? 0
@@ -506,7 +506,7 @@ async function loadCapital(userId) {
 }
 
 /** 镜像自 analyze.ts formatCapitalBlock */
-function formatCapitalBlock(capital, position) {
+export function formatCapitalBlock(capital, position) {
   const money = (v) => (v === null || v === undefined ? '--' : v.toFixed(2))
   const signed = (v) =>
     v === null || v === undefined ? '--' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
@@ -544,7 +544,7 @@ function formatCapitalBlock(capital, position) {
   return lines.join('\n')
 }
 
-async function loadFund(code) {
+export async function loadFund(code) {
   const basic = (
     await fundPool.query(`SELECT fund_name AS name FROM fund_basic WHERE fund_code = $1`, [code])
   ).rows[0]
@@ -654,14 +654,14 @@ async function loadFund(code) {
   const valuation = await loadIndexValuation(basic.name)
   return { basic, nav, holdings: { reportDate, rows }, est, news, tags, valuation }
 }
-async function loadBenchmark() {
+export async function loadBenchmark() {
   const r = await fundPool.query(
     `SELECT t.d AS date, t.close FROM (SELECT trade_date::text AS d, close FROM stock_daily WHERE stock_code = '000300' ORDER BY trade_date DESC LIMIT 200) t ORDER BY t.d`
   )
   if (!r.rows.length) return null
   return r.rows.map((x) => ({ date: x.date, nav: Number(x.close) }))
 }
-function formatEstimateBlock(est, today) {
+export function formatEstimateBlock(est, today) {
   const localDate = (d) => {
     const p = (n) => String(n).padStart(2, '0')
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
@@ -799,9 +799,13 @@ async function main() {
   await newsPool.end()
 }
 
-main().catch(async (e) => {
-  console.error('体检失败:', e.message)
-  await fundPool.end().catch(() => {})
-  await newsPool.end().catch(() => {})
-  process.exit(1)
-})
+// 仅在被直接执行时跑 CLI；被 import（如 ab-prompt-compare.mjs 复用取数）时只提供上面的函数与连接池。
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+if (isDirectRun) {
+  main().catch(async (e) => {
+    console.error('体检失败:', e.message)
+    await fundPool.end().catch(() => {})
+    await newsPool.end().catch(() => {})
+    process.exit(1)
+  })
+}

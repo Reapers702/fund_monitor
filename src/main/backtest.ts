@@ -298,7 +298,7 @@ async function decide(
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: userPrompt }
     ],
-    { temperature: 0.3, maxTokens: 2000 } // 思考型模型 reasoning 亦占额度，与 analyze 口径保持一致
+    { temperature: 0, maxTokens: 2000 } // 与 analyze 口径一致：回测尤其不能有采样噪声，否则命中率统计被抖动稀释
   )
   const parsed = parseAdvice(raw)
   if (!parsed) throw new Error(`LLM 解析失败: ${raw.slice(0, 150)}`)

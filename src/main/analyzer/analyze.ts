@@ -511,7 +511,11 @@ export async function analyzeFund(
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: userPrompt }
     ],
-    { temperature: 0.3, maxTokens: 2000 } // 思考型模型（如 deepseek-flash）reasoning 也占用该额度，须留足，否则 content 为空
+    // temperature=0：实测同一份数据、同一个 prompt 重复 3 次，0.3 会出现 hold/add/hold 混合（采样噪声），
+    // 而 0 时 8/8 基金结果完全可复现（scripts/ab-prompt-compare.mjs --repeat 3 --temp 0）。
+    // 建议类调用要的是可复现，不是多样性。
+    // maxTokens：思考型模型（如 deepseek-flash）reasoning 也占用该额度，须留足，否则 content 为空
+    { temperature: 0, maxTokens: 2000 }
   )
   const parsed = parseAdvice(raw)
   if (!parsed) {
