@@ -1,12 +1,14 @@
 // AI 分析（计划书 §7.3）：对单只基金生成 加仓/减仓/持有 建议
-// 输入：近120日净值 + 量化指标（回撤/波动/夏普/相对沪深300超额）+ 今日涨跌 + 盘中估值（当日采样抽稀）
-//      + 重仓股近10日表现 + 相关新闻（按重仓股/基金名过滤 ai_fund.raw_news）+ 用户持仓（份额/成本/盈亏）
+// 输入：近120日净值 + 量化指标（回撤/波动/夏普/相对沪深300超额）+ 板块估值分位 + 今日涨跌
+//      + 盘中估值（当日采样抽稀）+ 重仓股近10日表现 + 相关新闻（时效优先选材，见 news/reader.ts）
+//      + 用户持仓（份额/成本/盈亏）+ 组合上下文 + 规则引擎参考分
 // 输出：固定 JSON { action, confidence, reason }，写 ds_advice 保留 response_raw；action != hold 触发桌面通知
+// 体检工具：node scripts/diagnose-prompt-data.mjs（渲染真实 prompt 快照，检查各块是否按预期进入）
 import type { Pool } from 'pg'
 import { chatComplete, hasDeepseekKey, DeepseekError } from '../llm/deepseek'
 import { navSeries, latestHoldings, fundBasic, estimateSeries, listFunds, latestHoldingsBatch, navSeriesBatch } from '../storage/queries'
 import type { EstPoint, NavPoint, HoldingWithStock } from '../storage/queries'
-import { newsByTags } from '../news/reader'
+import { recentNewsForFunds } from '../news/reader'
 import { computePosition, listPositions } from '../position/position'
 import type { PositionSummary } from '../position/position'
 import { analyzePortfolio, formatPortfolioContext } from '../portfolio/portfolio'
@@ -14,6 +16,7 @@ import { createAiFundPool } from '../storage/db'
 import { isIntraday, isAfterClose } from '../scheduler/time'
 import { isTradingDay as isTradingDayCal } from '../scheduler/tradingCalendar'
 import { computeFundMetrics, computeRelativeStrength, formatMetricsBlock } from './metrics'
+import { loadIndexValuation, formatValuationBlock } from './valuation'
 import { BENCHMARK_NAME, loadBenchmarkNav } from '../crawler/benchmark'
 import { ESTIMATE_SOURCE_NAMES } from '../crawler/estimate'
 import { parseAdvice } from './parse'
@@ -46,6 +49,15 @@ export interface TimeContext {
 function dateStr(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** 新闻发布时间的时效标签：让模型一眼看出这条新闻"值多少钱"（今天/3天前/超一月） */
+function newsAgeTag(pubTime: Date): string {
+  const days = Math.max(0, Math.floor((Date.now() - pubTime.getTime()) / 86400000))
+  if (days === 0) return '今天'
+  if (days === 1) return '昨天'
+  if (days <= 30) return `${days}天前`
+  return '超一月'
 }
 
 /**
@@ -101,7 +113,9 @@ export const SYSTEM_PROMPT = `你是基金投资分析助手。基于给定的�
 10. 量化指标（年化收益/波动率/夏普/最大回撤/相对沪深300超额）已算好，直接使用，不要自行重算。
 11. 若给出了「组合上下文」，必须纳入：该基金与组合内其他基金高度重叠或高相关时，加仓是放大同一风险敞口而非分散风险，应更谨慎并说明；已在组合层面暴露过高的个股同理。
 12. suggestedPct：加仓给高于当前的比例、减仓给低于当前的比例、持有给持平；无持仓把握可填 null。
-13. reason 必须点明触发了哪几条交叉信号（动量/超额/企稳/催化/破位/利空），并说明为何达成或未达成操作条件，避免"等待企稳/观察再说"这类不给出操作的套话。`
+13. 若给出了「板块估值分位」，只作长周期贵/便宜的参考轴：分位极低（如 <20%）时，深跌更可能是"便宜"而非"趋势恶化"，此时减少减仓权重、但不等于可以抄底（仍要动量/催化剂交叉验证）；分位极高（如 >80%）时，反弹更可能是"贵"而非"值得追"，此时减少加仓权重。禁止仅凭估值分位下单。
+14. 新闻列表的方括号含义：[行业]=与该基金或其重仓股相关，[大盘]=行业新闻不足时的市场环境兜底（不可当成该基金的消息）；括号内是「日期|距今天数|情绪」。距今天数越大参考价值越低，超过 2 周且无摘要的旧闻不要当作"催化剂"。
+15. reason 必须点明触发了哪几条交叉信号（动量/超额/企稳/催化/破位/利空/估值分位），并说明为何达成或未达成操作条件，避免"等待企稳/观察再说"这类不给出操作的套话。`
 
 /** 估值来源 → 中文说明（与 alerts/UI 共用一份，见 crawler/estimate.ts） */
 const SOURCE_NAMES = ESTIMATE_SOURCE_NAMES
@@ -144,7 +158,7 @@ export interface PromptInput {
   code: string
   nav: NavPoint[]
   holdings: { reportDate: string | null; rows: HoldingWithStock[] }
-  news: { title: string | null; summary: string | null; sentiment: string | null; llmTags: string[] }[]
+  news: { title: string | null; summary: string | null; sentiment: string | null; llmTags: string[]; pubTime: Date | null; relevance?: 'match' | 'market' }[]
   position: PositionSummary | null
   timeCtx: string
   estimate: EstPoint[]
@@ -152,14 +166,14 @@ export interface PromptInput {
   portfolioBlock: string | null
   /** 规则引擎参考分块（config.analyzer.rulesInLLM 开启时才有；null 不拼） */
   ruleBlock: string | null
+  /** 板块估值分位块（index_valuation 命中该主题指数时才有；null 不拼） */
+  valuationBlock: string | null
 }
 
 /** 拼装 User Prompt（导出供单测：验证指标/组合/持仓/新闻/时点/规则分各块确实进入提示词） */
 export function buildUserPrompt(input: PromptInput): string {
-  const { fundName, code, nav, holdings, news, position, timeCtx, estimate, metricsBlock, portfolioBlock, ruleBlock } = input
+  const { fundName, code, nav, holdings, news, position, timeCtx, estimate, metricsBlock, portfolioBlock, ruleBlock, valuationBlock } = input
   const latestNav = nav[nav.length - 1]
-  const firstNav = nav[0]
-  const periodPct = firstNav && firstNav.nav > 0 ? (((latestNav.nav - firstNav.nav) / firstNav.nav) * 100).toFixed(2) : null
 
   const navLines = nav.slice(-30).map((p) => `${p.date} ${p.nav.toFixed(4)} (${p.changePct === null ? '--' : p.changePct.toFixed(2)}%)`).join('\n')
 
@@ -172,7 +186,16 @@ export function buildUserPrompt(input: PromptInput): string {
 
   const newsLines = news
     .slice(0, 8)
-    .map((n) => `- [${n.sentiment ?? '未知情绪'}] ${n.title ?? ''} ${n.summary ? '| ' + n.summary.slice(0, 100) : ''}`)
+    .map((n) => {
+      // 带发布日与"几天前"：旧实现只给标题，模型无法判断这条新闻是当天的还是三周前的
+      const d = n.pubTime
+      const dateTag = d ? `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')}|${newsAgeTag(d)}` : '日期未知'
+      const head = n.title && n.title.trim() !== '' ? n.title : '(无标题)'
+      const body = n.summary ? ' | ' + n.summary.slice(0, 100) : ''
+      // [行业]=与该基金/重仓股相关；[大盘]=相关新闻不足时的市场环境兜底（不可当成该基金的消息）
+      const scope = n.relevance === 'market' ? '[大盘]' : '[行业]'
+      return `- ${scope}[${dateTag}|${n.sentiment ?? '未知情绪'}] ${head}${body}`
+    })
     .join('\n')
 
   // 用户持仓（M7 录入 fund_trade 计算而来；无持仓则提示）
@@ -185,9 +208,9 @@ export function buildUserPrompt(input: PromptInput): string {
 
   return `${timeCtx}
 基金：${fundName}（${code}）
-净值样本数：${nav.length} 条；区间涨跌：${periodPct ?? '--'}%（近${nav.length}个交易日，归一化起点）
+净值样本数：${nav.length} 条（区间累计涨跌见下方量化指标的"区间收益"）
 最新净值：${latestNav.nav.toFixed(4)}（${latestNav.date}），当日涨跌 ${latestNav.changePct === null ? '--' : latestNav.changePct.toFixed(2)}%
-${estBlock ? estBlock + '\n' : ''}${metricsBlock ? metricsBlock + '\n' : ''}${ruleBlock ? ruleBlock + '\n' : ''}${portfolioBlock ? portfolioBlock + '\n' : ''}${posLines}
+${estBlock ? estBlock + '\n' : ''}${metricsBlock ? metricsBlock + '\n' : ''}${valuationBlock ? valuationBlock + '\n' : ''}${ruleBlock ? ruleBlock + '\n' : ''}${portfolioBlock ? portfolioBlock + '\n' : ''}${posLines}
 
 近 30 日净值：
 ${navLines}
@@ -195,7 +218,7 @@ ${navLines}
 最新重仓股（报告期 ${holdings.reportDate ?? '无'}）：
 ${holdLines || '（无持仓数据）'}
 
-相关新闻（最近 8 条，按重仓股/主题过滤）：
+相关新闻（最多 8 条；[行业]=与本基金/重仓股相关，[大盘]=行业新闻不足时的市场兜底；括号为「日期|距今天数|情绪」，越旧参考价值越低）：
 ${newsLines || '（无相关新闻）'}
 
 请给出 加仓/减仓/持有 建议。`
@@ -288,10 +311,12 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     }
   }
 
-  // 相关新闻：用基金名关键词 + 前 8 个重仓股名过滤 ai_fund.raw_news
+  // 相关新闻：基金名关键词 + 前 8 个重仓股名过滤 ai_fund.raw_news。
+  // 选材走 recentNewsForFunds（时效优先 + 逐级降级 + 可用性排序），原因见该函数注释：
+  // 旧实现按时间倒序取"全库最新 10 条"，实测近 7 天命中常常不足，会把三周前的旧闻当成"最新"。
   const stockNames = holdings.rows.map((h) => h.stockName).filter((s): s is string => Boolean(s)).slice(0, 8)
   const fundKeywords = [basic.name.replace(/[联接A-C0-9]+$/g, '').slice(0, 6)]
-  const news = await newsByTags(aiFundPool, [...fundKeywords, ...stockNames], 10)
+  const news = await recentNewsForFunds(aiFundPool, { tags: [...fundKeywords, ...stockNames], limit: 8 })
 
   // 时点上下文：让 AI 区分盘中估算/收盘确认、盘前预判/盘后复盘（日历接口失败则按周末判断兜底）
   let timeCtx = ''
@@ -331,6 +356,15 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     }
   }
 
+  // 板块估值分位：补上"该板块现在贵还是便宜"的长周期参考轴（行业主题基金尤其需要）
+  let valuationBlock: string | null = null
+  try {
+    const val = await loadIndexValuation(pool, basic.name)
+    if (val) valuationBlock = formatValuationBlock(val)
+  } catch (e) {
+    console.warn(`[analyze] ${code} 板块估值分位计算失败（忽略继续）: ${(e as Error).message}`)
+  }
+
   const userPrompt = buildUserPrompt({
     fundName: basic.name,
     code,
@@ -342,7 +376,8 @@ export async function analyzeFund(ctx: AnalyzeContext, code: string, cost: numbe
     estimate,
     metricsBlock,
     portfolioBlock,
-    ruleBlock
+    ruleBlock,
+    valuationBlock
   })
   const raw = await chatComplete(
     [

@@ -110,11 +110,11 @@ async function holdingsUpTo(pool: Pool, code: string, asof: string): Promise<{ r
 }
 
 /** 相关新闻：截至 asof 当日 15:40（模拟当时 15:35 分析可见的全部当日新闻，含盘中） */
-async function newsUpTo(pool: Pool, tags: string[], asof: string, limit = 10): Promise<{ title: string | null; summary: string | null; sentiment: string | null; llmTags: string[] }[]> {
+async function newsUpTo(pool: Pool, tags: string[], asof: string, limit = 10): Promise<{ title: string | null; summary: string | null; sentiment: string | null; llmTags: string[]; pubTime: Date | null }[]> {
   if (tags.length === 0) return []
   const asofAt = new Date(asof + 'T15:40:00')
-  const r = await pool.query<{ title: string | null; summary: string | null; sentiment: string | null; llm_tags: string | null }>(
-    `SELECT title, summary, sentiment, llm_tags::text AS llm_tags FROM raw_news
+  const r = await pool.query<{ title: string | null; summary: string | null; sentiment: string | null; llm_tags: string | null; pub_time: Date | null }>(
+    `SELECT title, summary, sentiment, llm_tags::text AS llm_tags, pub_time FROM raw_news
      WHERE (llm_tags ?| $1 OR tags ?| $1 OR title ILIKE ANY ($2)) AND pub_time <= $3
      ORDER BY pub_time DESC LIMIT $4`,
     [tags, tags.map((t) => `%${t}%`), asofAt, limit]
@@ -123,6 +123,7 @@ async function newsUpTo(pool: Pool, tags: string[], asof: string, limit = 10): P
     title: x.title,
     summary: x.summary,
     sentiment: x.sentiment,
+    pubTime: x.pub_time,
     llmTags: (() => { try { const a = JSON.parse(x.llm_tags ?? '[]'); return Array.isArray(a) ? a.map(String) : [] } catch { return [] } })()
   }))
 }
@@ -210,7 +211,10 @@ async function decide(ctx: { pool: Pool; aiFundPool: Pool }, code: string, name:
     estimate: [] as EstPoint[], // 库中无对应采样日的历史盘中估值（盘后视角）
     metricsBlock,
     portfolioBlock: null, // 回测口径：不加载组合上下文（依赖当前持仓市值）
-    ruleBlock: null // 回测口径：不注入规则分（回测检验的是 LLM 基线，规则分另有 --rules-backtest）
+    ruleBlock: null, // 回测口径：不注入规则分（回测检验的是 LLM 基线，规则分另有 --rules-backtest）
+    // 回测口径：不注入当前估值分位——index_valuation 只有最近几天的快照，
+    // 拿它当历史采样日的分位属于未来信息穿越，会污染基线
+    valuationBlock: null
   })
 
   const raw = await chatComplete(

@@ -22,8 +22,8 @@ const holdings = {
 }
 
 const news = [
-  { title: '光模块需求旺盛', summary: '头部厂商订单饱满', sentiment: 'positive', llmTags: ['光通信'] },
-  { title: '某公司遭减持', summary: '大股东计划减持', sentiment: 'negative', llmTags: ['减持'] }
+  { title: '光模块需求旺盛', summary: '头部厂商订单饱满', sentiment: 'positive', llmTags: ['光通信'], pubTime: new Date() },
+  { title: '某公司遭减持', summary: '大股东计划减持', sentiment: 'negative', llmTags: ['减持'], pubTime: new Date(Date.now() - 3 * 86400000) }
 ]
 
 const position: PositionSummary = {
@@ -50,7 +50,15 @@ function todayEstimate(): EstPoint[] {
   ]
 }
 
-function build(opts: { metricsBlock?: string | null; portfolioBlock?: string | null; estimate?: EstPoint[]; position?: PositionSummary | null } = {}): string {
+function build(
+  opts: {
+    metricsBlock?: string | null
+    portfolioBlock?: string | null
+    valuationBlock?: string | null
+    estimate?: EstPoint[]
+    position?: PositionSummary | null
+  } = {}
+): string {
   return buildUserPrompt({
     fundName: '东财云计算指数增强C',
     code: '012322',
@@ -64,7 +72,8 @@ function build(opts: { metricsBlock?: string | null; portfolioBlock?: string | n
       opts.metricsBlock === undefined
         ? '量化指标（基于近 400 个交易日净值，年化按 244 交易日）：\n区间收益 +12.00%｜夏普 0.85'
         : opts.metricsBlock,
-    portfolioBlock: opts.portfolioBlock === undefined ? null : opts.portfolioBlock
+    portfolioBlock: opts.portfolioBlock === undefined ? null : opts.portfolioBlock,
+    valuationBlock: opts.valuationBlock === undefined ? null : opts.valuationBlock
   })
 }
 
@@ -90,8 +99,13 @@ describe('buildUserPrompt（提示词组装）', () => {
     expect(p).toContain('最新净值：1.4800（2026-08-14）')
     expect(p).toContain('最新重仓股（报告期 2026-06-30）')
     expect(p).toContain('1. 中际旭创 权重5.59% 近10日7.76%')
-    expect(p).toContain('相关新闻（最近 8 条')
+    expect(p).toContain('相关新闻（最多 8 条')
     expect(p).toContain('光模块需求旺盛')
+    // 新闻需标注归属（行业/大盘）与时效（今天/N天前）。时效标签用正则匹配，
+    // 避免"刚过 0 点跑测试"时整日差向下取整导致断言抖动。
+    expect(p).toContain('[行业][')
+    expect(p).toMatch(/- \[行业\]\[(今天|昨天|\d+天前)\|positive\]/)
+    expect(p).toMatch(/- \[行业\]\[(今天|昨天|\d+天前)\|negative\]/)
     expect(p).toContain('持有 1000 份')
     expect(p).toContain('浮动盈亏 -120.00')
   })
@@ -118,6 +132,54 @@ describe('buildUserPrompt（提示词组装）', () => {
   it('无组合上下文/无指标块时不出现空标题（避免模型追着不存在的数据解释）', () => {
     const p = build({ portfolioBlock: null })
     expect(p).not.toContain('组合上下文')
+  })
+
+  it('板块估值分位块进入提示词（长周期贵/便宜参考轴）', () => {
+    const block = '板块估值分位（中证白酒，截至 2026-10-18，数据源估值标签【低估】）：PE 分位 20.7%（中低）｜PB 分位 3.3%（偏低）'
+    const p = build({ valuationBlock: block })
+    expect(p).toContain('板块估值分位')
+    expect(p).toContain('PE 分位 20.7%')
+  })
+
+  it('无估值分位数据时不出现该块', () => {
+    const p = build({ valuationBlock: null })
+    expect(p).not.toContain('板块估值分位')
+  })
+
+  it('净值样本行不再重复区间涨跌（区间收益只由指标块给一次）', () => {
+    const p = build()
+    // 指标块给"区间收益"，样本行只提示去看指标块，避免同一数字出现两次
+    expect(p).toContain('区间累计涨跌见下方量化指标')
+    expect(p).not.toContain('区间涨跌：')
+  })
+
+  it('SYSTEM_PROMPT 允许估值分位参与判断但禁止单独成为依据', () => {
+    expect(SYSTEM_PROMPT).toContain('板块估值分位')
+    expect(SYSTEM_PROMPT).toContain('禁止仅凭估值分位下单')
+  })
+
+  it('SYSTEM_PROMPT 说明新闻的行业/大盘归属与时效含义', () => {
+    expect(SYSTEM_PROMPT).toContain('[行业]=与该基金或其重仓股相关')
+    expect(SYSTEM_PROMPT).toContain('距今天数越大参考价值越低')
+  })
+
+  it('大盘兜底新闻被标为 [大盘]，不会被误读成该基金的消息', () => {
+    const p = buildUserPrompt({
+      fundName: '某宽基联接',
+      code: '110020',
+      nav,
+      holdings,
+      news: [{ title: '纳指收涨', summary: '美股走强', sentiment: 'positive', llmTags: [], pubTime: new Date(), relevance: 'market' }],
+      position: null,
+      timeCtx: '分析时点：2026-08-19',
+      estimate: [],
+      metricsBlock: null,
+      portfolioBlock: null,
+      ruleBlock: null,
+      valuationBlock: null
+    })
+    expect(p).toContain('[大盘][')
+    expect(p).not.toContain('[行业][')
   })
 
   it('SYSTEM_PROMPT 要求把组合重叠纳入判断', () => {
