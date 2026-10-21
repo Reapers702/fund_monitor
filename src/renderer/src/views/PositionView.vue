@@ -27,6 +27,10 @@ const profile = ref<FundProfile>({ buyFeePct: 0, sellFeePct: 0, marketBudget: 0 
 const portfolio = ref<PortfolioAnalysis | null>(null)
 /** 资金计划与闲钱（main/position/position.ts computeCapitalSummary） */
 const capital = ref<CapitalSummary | null>(null)
+/** 目标仓位与缺口（position.ts listFundTargets）：含尚未建仓的基金 */
+const fundTargets = ref<{ budget: number; targets: FundTarget[] } | null>(null)
+/** 目标占比编辑草稿（code → 百分比）；保存时与服务端值对比出改动 */
+const targetDraft = ref<Record<string, number | null>>({})
 /** 「计划投入基金市场」输入框（null = 未设置，避免显示 0 造成误解） */
 const budgetInput = ref<number | null>(null)
 /** 集中度提示阈值（与 main/portfolio/portfolio.ts 的 CONCENTRATION_WARN_PCT 保持一致） */
@@ -64,6 +68,8 @@ async function load(): Promise<void> {
     // 资金计划：预算 + 已投入 + 闲钱（闲钱 = 预算 − 已投入本金，见 computeCapitalSummary）
     capital.value = await window.api.positionCapital()
     budgetInput.value = capital.value.marketBudget > 0 ? capital.value.marketBudget : null
+    // 目标仓位（含未建仓的基金：用户往往先设目标再分批买入）
+    await loadTargets()
     const funds = await window.api.fundsList()
     formFunds.value = funds
       .filter((f) => f.isActive === 1)
@@ -198,6 +204,62 @@ async function saveBudget(): Promise<void> {
   }
 }
 
+/** 读取目标仓位并重置编辑草稿 */
+async function loadTargets(): Promise<void> {
+  fundTargets.value = await window.api.positionTargets()
+  targetDraft.value = Object.fromEntries(
+    fundTargets.value.targets.map((t) => [t.fundCode, t.targetPct])
+  )
+}
+
+/** 目标合计 %（用草稿值，便于边改边看是否超 100%） */
+const targetSum = computed(() =>
+  Object.values(targetDraft.value).reduce<number>((s: number, v) => s + (v ?? 0), 0)
+)
+
+/** 有未保存改动的基金数 */
+const targetDirtyCount = computed(() => {
+  const list = fundTargets.value?.targets ?? []
+  return list.filter((t) => (targetDraft.value[t.fundCode] ?? null) !== t.targetPct).length
+})
+
+/** 按草稿值算目标金额（改了输入框立刻能看到对应金额） */
+function draftTargetAmount(t: FundTarget): number | null {
+  const pct = targetDraft.value[t.fundCode]
+  const budget = fundTargets.value?.budget ?? 0
+  if (pct === null || pct === undefined || budget <= 0) return null
+  return (budget * pct) / 100
+}
+
+/** 保存全部目标占比改动（清空 = 未设目标，回到择时逻辑） */
+async function saveAllTargets(): Promise<void> {
+  const list = fundTargets.value?.targets ?? []
+  const changed = list.filter((t) => (targetDraft.value[t.fundCode] ?? null) !== t.targetPct)
+  if (changed.length === 0) {
+    message.info('没有需要保存的改动')
+    return
+  }
+  try {
+    for (const t of changed) {
+      await window.api.positionSetTarget(t.fundCode, targetDraft.value[t.fundCode] ?? null)
+    }
+    message.success(`已保存 ${changed.length} 只基金的目标占比`)
+    await loadTargets()
+  } catch (e) {
+    message.error(`保存目标占比失败: ${(e as Error).message}`)
+  }
+}
+
+/** 缺口展示：还差 X（正）/ 超出 X（负） */
+function gapText(v: number | null | undefined): string {
+  if (v === null || v === undefined) return '--'
+  return v >= 0 ? `还差 ${v.toFixed(2)}` : `超出 ${Math.abs(v).toFixed(2)}`
+}
+function gapClass(v: number | null | undefined): string {
+  if (v === null || v === undefined) return 'muted'
+  return v > 0 ? 'up' : v < 0 ? 'down' : 'muted'
+}
+
 onMounted(load)
 </script>
 
@@ -270,6 +332,86 @@ onMounted(load)
         未设置计划投入金额。填写后，本页会按已录入的持仓自动算出剩余闲钱，并把这个资金约束一并交给
         AI ——避免出现"建议加仓但你没有钱"的建议。
       </p>
+    </n-card>
+
+    <n-card title="目标仓位" class="card">
+      <template #header-extra>
+        <span class="muted-line"
+          >目标占比 = 占「计划投入」的比例；留空 = 不设目标（仍按择时逻辑判断）</span
+        >
+      </template>
+
+      <p v-if="!fundTargets || fundTargets.targets.length === 0" class="muted-line">
+        暂无启用中的自选基金。先在「我的基金」添加，再回来设目标占比。
+      </p>
+      <template v-else>
+        <n-alert
+          v-if="fundTargets.budget <= 0"
+          type="info"
+          :bordered="false"
+          class="portfolio-alert"
+        >
+          还没有「计划投入基金市场」金额，目标占比无法换算成金额。请先在上面的「资金计划」里填写。
+        </n-alert>
+        <n-alert
+          v-else-if="targetSum > 100.01"
+          type="warning"
+          :bordered="false"
+          class="portfolio-alert"
+        >
+          目标合计 {{ targetSum.toFixed(1) }}% 已超过 100%：超出计划投入的部分没有资金来源，请下调。
+        </n-alert>
+
+        <n-table size="small" :bordered="false">
+          <thead>
+            <tr>
+              <th>基金</th>
+              <th>当前市值</th>
+              <th>当前占计划</th>
+              <th>目标占计划 %</th>
+              <th>目标金额</th>
+              <th>距目标缺口</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="t in fundTargets.targets" :key="t.fundCode">
+              <td class="fund-cell">
+                <div class="fund-name">{{ t.fundName ?? t.fundCode }}</div>
+                <div class="fund-code">{{ t.fundCode }}</div>
+              </td>
+              <td>{{ fmtMoney(t.currentValue) }}</td>
+              <td>{{ fmtPctPlain(t.currentPct) }}</td>
+              <td>
+                <n-input-number
+                  v-model:value="targetDraft[t.fundCode]"
+                  :min="0"
+                  :max="100"
+                  :step="1"
+                  :show-button="false"
+                  placeholder="不设"
+                  size="small"
+                  class="target-input"
+                />
+              </td>
+              <td>{{ draftTargetAmount(t) === null ? '--' : fmtMoney(draftTargetAmount(t)) }}</td>
+              <td :class="gapClass(t.gapAmount)">{{ gapText(t.gapAmount) }}</td>
+            </tr>
+          </tbody>
+        </n-table>
+
+        <div class="target-foot">
+          <span class="muted-line">目标合计 {{ targetSum.toFixed(1) }}%</span>
+          <n-button
+            size="small"
+            type="primary"
+            secondary
+            :disabled="targetDirtyCount === 0"
+            @click="saveAllTargets"
+          >
+            保存目标占比{{ targetDirtyCount > 0 ? `（${targetDirtyCount} 处改动）` : '' }}
+          </n-button>
+        </div>
+      </template>
     </n-card>
 
     <n-card title="持仓汇总" class="card">
@@ -689,6 +831,19 @@ onMounted(load)
   margin: 0;
   font-size: 12px;
   color: var(--text-color-3);
+}
+
+/* ---------- 目标仓位 ---------- */
+
+.target-input {
+  width: 90px;
+}
+
+.target-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
 }
 
 /* ---------- 资金计划 ---------- */

@@ -41,6 +41,10 @@ const api: FundApi = {
     marketBudget?: number
   }): Promise<FundProfile> => ipcRenderer.invoke('position:profile', patch),
   positionCapital: (): Promise<CapitalSummary> => ipcRenderer.invoke('position:capital'),
+  positionTargets: (): Promise<{ budget: number; targets: FundTarget[] }> =>
+    ipcRenderer.invoke('position:targets'),
+  positionSetTarget: (code: string, targetPct: number | null): Promise<boolean> =>
+    ipcRenderer.invoke('position:setTarget', code, targetPct),
   portfolioAnalysis: (): Promise<PortfolioAnalysis> => ipcRenderer.invoke('portfolio:analysis'),
 
   newsRecent: (limit?: number): Promise<NewsRow[]> => ipcRenderer.invoke('news:recent', limit),

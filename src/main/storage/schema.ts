@@ -127,10 +127,12 @@ export const SCHEMA_STATEMENTS: string[] = [
   )`,
 
   // 用户自选基金（is_active 1=启用/0=停用）；fund_basic.is_active 弃用，查询全部走本表
+  // target_pct = 该基金的目标占比 %（占「计划投入基金市场」总额）；NULL = 未设目标（仍走择时逻辑）
   `CREATE TABLE IF NOT EXISTS user_fund (
       user_id    INT NOT NULL REFERENCES app_user(id),
       fund_code  VARCHAR(8) NOT NULL,
       is_active  INT NOT NULL DEFAULT 1,
+      target_pct NUMERIC(6,2),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (user_id, fund_code)
   )`,
@@ -230,5 +232,8 @@ export const MIGRATION_STATEMENTS: string[] = [
    END $$`,
 
   // 基金市场计划投入总额（老库补列；0 = 未设置）
-  `ALTER TABLE fund_profile ADD COLUMN IF NOT EXISTS market_budget NUMERIC(14,2) NOT NULL DEFAULT 0`
+  `ALTER TABLE fund_profile ADD COLUMN IF NOT EXISTS market_budget NUMERIC(14,2) NOT NULL DEFAULT 0`,
+
+  // 自选基金的目标占比 %（老库补列；NULL = 未设目标，保持原择时逻辑）
+  `ALTER TABLE user_fund ADD COLUMN IF NOT EXISTS target_pct NUMERIC(6,2)`
 ]

@@ -89,6 +89,40 @@ node scripts/verify-prompt-blocks.mjs     # 退出码 0 = 全部通过
 
 ---
 
+## fund-candidates.mjs —— C 类基金候选池（数据驱动筛选）
+
+把**估值分位偏低的指数**（来自本地 `index_valuation`）映射到对应的 **C 类指数基金**候选，附规模 / 申购费率等客观字段。
+
+```bash
+node scripts/fund-candidates.mjs                     # 低估指数 Top10
+node scripts/fund-candidates.mjs --top 20 --detail   # 更多指数 + 抓规模/费率
+node scripts/fund-candidates.mjs --index 证券公司,中证医疗
+node scripts/fund-candidates.mjs --out .tmp-cand/candidates.md
+```
+
+**它不是投资建议工具**：只列客观字段，不判断"该不该买"、不排序"哪只最好"。估值分位低 ≠ 会涨（本地 AI 分析就出现过"PE 分位 0% 仍判 hold"）。另外 **C 类的销售服务费取不到**（需在平台自行核实）；规模过小（如 <2 亿）有清盘风险。
+
+实现要点：拉一次全市场基金列表（约 2.8 万只，缓存在 `.tmp-cand/`，24 小时有效），本地筛出"名称以 C 结尾 + 含指数/ETF联接特征"的基金，再与指数名做关键词匹配 —— 比逐个指数去搜索接口覆盖更全、请求更少。
+
+---
+
+## manage-watchlist.mjs —— 自选批量管理
+
+GUI「我的基金」只能一只只加，批量换仓很繁琐。本工具走**与 GUI 同一套同步逻辑**（`src/main/fund.ts` 的 `syncFund`：基金详情 + 历史净值 + 季报持仓），不是裸写 SQL。
+
+```bash
+node scripts/manage-watchlist.mjs list                    # 自选与启用状态
+node scripts/manage-watchlist.mjs add 008591,013180       # 同步数据 + 加入自选
+node scripts/manage-watchlist.mjs disable 001550,004069   # 停用（保留数据，可再启用）
+node scripts/manage-watchlist.mjs enable 001550
+```
+
+`add` 会逐只抓取（首次全量补种净值 + 季报持仓，每只约 10~35 秒）并打印进度；停用只是 `is_active=0`，数据保留、随时可恢复。
+
+> 提示：本脚本用 esbuild 打包 `fund.ts` 并 stub 掉 electron（脚本不需要 Electron 运行时），所以会看到 `[config] 读取失败 config.json，回退默认配置` 的日志 —— 数据库连接仍从 `.env` 读取，属正常现象。
+
+---
+
 ## ensure-db.js —— 创建数据库
 
 ```bash

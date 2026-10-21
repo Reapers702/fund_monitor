@@ -18,8 +18,13 @@ import {
 } from '../storage/queries'
 import type { EstPoint, NavPoint, HoldingWithStock } from '../storage/queries'
 import { recentNewsForFunds } from '../news/reader'
-import { computePosition, listPositions, computeCapitalSummary } from '../position/position'
-import type { PositionSummary, CapitalSummary } from '../position/position'
+import {
+  computePosition,
+  listPositions,
+  computeCapitalSummary,
+  listFundTargets
+} from '../position/position'
+import type { PositionSummary, CapitalSummary, FundTarget } from '../position/position'
 import { analyzePortfolio, formatPortfolioContext } from '../portfolio/portfolio'
 import { createAiFundPool } from '../storage/db'
 import { isIntraday, isAfterClose } from '../scheduler/time'
@@ -67,6 +72,21 @@ function newsAgeTag(pubTime: Date): string {
   if (days === 1) return '昨天'
   if (days <= 30) return `${days}天前`
   return '超一月'
+}
+
+/**
+ * 重仓股报告期的过期提示（未过期返回空串）。
+ * 为什么需要：ETF 联接基金主要持有目标 ETF 而非直接持股，东财侧往往**只有很早年份**的
+ * 股票持仓（实测华宝医疗ETF联接C 只有 2021 年、华宝科技ETF联接C 只有 2024 年）。
+ * 不标注的话，模型会把几年前的名单当成"最新重仓股"用来判断催化剂。
+ */
+function holdingsStaleMonths(reportDate: string | null, now = new Date()): string {
+  if (!reportDate) return ''
+  const d = new Date(`${reportDate}T00:00:00`)
+  if (Number.isNaN(d.getTime())) return ''
+  const months = (now.getFullYear() - d.getFullYear()) * 12 + (now.getMonth() - d.getMonth())
+  if (months < 6) return ''
+  return ` ⚠️数据已过期约 ${months} 个月，不代表当前持仓，请勿据此判断催化剂`
 }
 
 /**
@@ -131,7 +151,11 @@ export const SYSTEM_PROMPT = `你是基金投资分析助手。基于给定的�
 13. 若给出了「板块估值分位」，只作长周期贵/便宜的参考轴：分位极低（如 <20%）时，深跌更可能是"便宜"而非"趋势恶化"，此时减少减仓权重、但不等于可以抄底（仍要动量/催化剂交叉验证）；分位极高（如 >80%）时，反弹更可能是"贵"而非"值得追"，此时减少加仓权重。禁止仅凭估值分位下单。
 14. 新闻列表的方括号含义：[行业]=与该基金或其重仓股相关，[大盘]=行业新闻不足时的市场环境兜底（不可当成该基金的消息）；括号内是「日期|距今天数|情绪」。距今天数越大参考价值越低，超过 2 周且无摘要的旧闻不要当作"催化剂"。
 15. reason 必须点明触发了哪几条交叉信号（动量/超额/企稳/催化/破位/利空/估值分位），并说明为何达成或未达成操作条件，避免"等待企稳/观察再说"这类不给出操作的套话。
-16. 若给出了「资金与仓位」，当作资金约束使用：建议加仓时不得超出"剩余闲钱"（也不再重复建议已用满的仓位）；闲钱为负（已超支）时只考虑持有或减仓、禁止建议加仓。判断该基金仓位轻重时，同时参考"占已投入本金/占计划投入/占组合市值"三个比例，不要只看盈亏比例。`
+16. 若给出了「资金与仓位」，当作资金约束使用：建议加仓时不得超出"剩余闲钱"（也不再重复建议已用满的仓位）；闲钱为负（已超支）时只考虑持有或减仓、禁止建议加仓。判断该基金仓位轻重时，同时参考"占已投入本金/占计划投入/占组合市值"三个比例，不要只看盈亏比例。
+17. 「配置目标」（只在本基金设了目标占比时出现）与择时条件**并用、不冲突**：目标回答"该不该配、还差多少"，动量/企稳回答"现在补多少合适"。
+   a) 有缺口（当前市值 < 目标金额）时，那是**待配置资金**，不要因为"没等到右侧信号"就长期空着；缺口金额占目标越大、且板块估值分位越低（如 <50%），越应给出 add，并在 reason 里说明本次拟投入金额（不超过剩余闲钱）与分批计划。
+   b) 轻微缺口（<目标的 10%）可以 hold；已超目标 10% 以上时，即使动量偏强也应考虑 reduce 回到目标。
+   c) 未设目标占比的基金仍按第 6/7 条择时逻辑判断，不要用"配置缺口"为它开脱。`
 
 /** 估值来源 → 中文说明（与 alerts/UI 共用一份，见 crawler/estimate.ts） */
 const SOURCE_NAMES = ESTIMATE_SOURCE_NAMES
@@ -179,7 +203,8 @@ ${picked.map((p) => `${hm(p)} ${pct(p)}`).join('\n')}`
  */
 export function formatCapitalBlock(
   capital: CapitalSummary | null,
-  position: PositionSummary | null
+  position: PositionSummary | null,
+  target: FundTarget | null = null
 ): string {
   const money = (v: number | null | undefined): string =>
     v === null || v === undefined ? '--' : v.toFixed(2)
@@ -221,6 +246,20 @@ export function formatCapitalBlock(
     lines.push('- 本基金：未录入持仓（无法给出基于成本/盈亏的操作建议）。')
   }
 
+  // 配置目标：把"该配多少"与"现在补多少"分开（只在本基金设了目标占比时出现）
+  if (target && target.targetPct !== null && target.targetAmount !== null) {
+    const gap = target.gapAmount ?? 0
+    const gapPct = target.targetAmount > 0 ? (gap / target.targetAmount) * 100 : 0
+    lines.push(
+      `- **配置目标**：目标占比 ${plain(target.targetPct)}（= ${money(target.targetAmount)} 元）；当前 ${money(target.currentValue)} 元（占计划投入 ${plain(target.currentPct)}）；` +
+        (gap > 0
+          ? `**距目标还差 ${money(gap)} 元（缺口 ${plain(gapPct)}）——这是待配置资金**`
+          : `已超目标 ${money(-gap)} 元`)
+    )
+  } else if (target) {
+    lines.push('- 配置目标：未设目标占比（按择时逻辑判断，不用配置缺口衡量）。')
+  }
+
   return lines.join('\n')
 }
 
@@ -241,6 +280,8 @@ export interface PromptInput {
   position: PositionSummary | null
   /** 用户资金全景（计划投入/已投入本金/剩余闲钱/各基金占比）；无记录时为 null */
   capital: CapitalSummary | null
+  /** 本基金的配置目标与缺口（未设目标占比时为 null） */
+  fundTarget: FundTarget | null
   timeCtx: string
   estimate: EstPoint[]
   metricsBlock: string | null
@@ -261,6 +302,7 @@ export function buildUserPrompt(input: PromptInput): string {
     news,
     position,
     capital,
+    fundTarget,
     timeCtx,
     estimate,
     metricsBlock,
@@ -279,6 +321,9 @@ export function buildUserPrompt(input: PromptInput): string {
     .join('\n')
 
   const estBlock = formatEstimateBlock(estimate)
+
+  // 持仓数据过期提醒：ETF 联接基金常无近期股票持仓（东财侧只有很早的年份），不标注会误导模型
+  const holdingsStaleTag = holdingsStaleMonths(holdings.reportDate)
 
   const holdLines = holdings.rows
     .slice(0, 10)
@@ -305,7 +350,7 @@ export function buildUserPrompt(input: PromptInput): string {
     .join('\n')
 
   // 用户资金与仓位（M7 录入 fund_trade 计算而来）：买入本金/份额/盈亏 + 计划投入/剩余闲钱/该基金占比
-  const capitalBlock = formatCapitalBlock(capital, position)
+  const capitalBlock = formatCapitalBlock(capital, position, fundTarget)
 
   return `${timeCtx}
 基金：${fundName}（${code}）
@@ -316,7 +361,7 @@ ${estBlock ? estBlock + '\n' : ''}${metricsBlock ? metricsBlock + '\n' : ''}${va
 近 30 日净值：
 ${navLines}
 
-最新重仓股（报告期 ${holdings.reportDate ?? '无'}）：
+最新重仓股（报告期 ${holdings.reportDate ?? '无'}${holdingsStaleTag}）：
 ${holdLines || '（无持仓数据）'}
 
 相关新闻（最多 8 条；[行业]=与本基金/重仓股相关，[大盘]=行业新闻不足时的市场兜底；括号为「日期|距今天数|情绪」，越旧参考价值越低）：
@@ -431,6 +476,15 @@ export async function analyzeFund(
     console.warn(`[analyze] ${code} 资金全景计算失败（忽略继续）: ${(e as Error).message}`)
   }
 
+  // 配置目标：本基金的目标占比与缺口（未设目标时为 null，仍走择时逻辑）
+  let fundTarget: FundTarget | null = null
+  try {
+    const { targets } = await listFundTargets(pool, userId)
+    fundTarget = targets.find((t) => t.fundCode === code) ?? null
+  } catch (e) {
+    console.warn(`[analyze] ${code} 目标仓位读取失败（忽略继续）: ${(e as Error).message}`)
+  }
+
   // 相关新闻：基金名关键词 + 前 8 个重仓股名过滤 ai_fund.raw_news。
   // 选材走 recentNewsForFunds（时效优先 + 逐级降级 + 可用性排序），原因见该函数注释：
   // 旧实现按时间倒序取"全库最新 10 条"，实测近 7 天命中常常不足，会把三周前的旧闻当成"最新"。
@@ -499,6 +553,7 @@ export async function analyzeFund(
     news,
     position,
     capital,
+    fundTarget,
     timeCtx,
     estimate,
     metricsBlock,

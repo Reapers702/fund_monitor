@@ -46,9 +46,11 @@ import {
   deleteTrade,
   getProfile,
   saveProfile,
-  computeCapitalSummary
+  computeCapitalSummary,
+  listFundTargets,
+  setFundTarget
 } from './position/position'
-import type { TradeRow, CapitalSummary } from './position/position'
+import type { TradeRow, CapitalSummary, FundTarget } from './position/position'
 import {
   getCurrentUserId,
   setCurrentUserId,
@@ -458,6 +460,34 @@ export function registerIpcHandlers(_win: BrowserWindow): void {
       await pool.end().catch(() => {})
     }
   })
+
+  // 目标仓位（配置视角）：含尚未建仓的基金，便于按目标分批补仓
+  ipcMain.handle(
+    'position:targets',
+    async (): Promise<{ budget: number; targets: FundTarget[] }> => {
+      const cfg = loadConfig()
+      const pool = createPool(cfg)
+      try {
+        return await listFundTargets(pool, getCurrentUserId())
+      } finally {
+        await pool.end().catch(() => {})
+      }
+    }
+  )
+
+  // 设置/清除某只基金的目标占比 %（传 null 清除）
+  ipcMain.handle(
+    'position:setTarget',
+    async (_e, code: string, targetPct: number | null): Promise<boolean> => {
+      const cfg = loadConfig()
+      const pool = createPool(cfg)
+      try {
+        return await setFundTarget(pool, getCurrentUserId(), code, targetPct)
+      } finally {
+        await pool.end().catch(() => {})
+      }
+    }
+  )
 
   ipcMain.handle(
     'position:profile',

@@ -361,6 +361,21 @@ interface CapitalFundPosition {
 }
 
 /**
+ * 单只基金的目标仓位与缺口（position:targets 返回）。
+ * 口径：target_pct 占「计划投入基金市场」总额；gapAmount = 目标金额 − 当前市值。
+ */
+interface FundTarget {
+  fundCode: string
+  fundName: string | null
+  /** 目标占比 %；null = 未设目标（仍走择时逻辑） */
+  targetPct: number | null
+  targetAmount: number | null
+  currentValue: number
+  currentPct: number | null
+  gapAmount: number | null
+}
+
+/**
  * 用户资金全景（position:capital 返回）。
  * 闲钱口径 = 计划投入 − 已投入本金（现金流口径）；负数表示已超支。
  */
@@ -575,6 +590,8 @@ interface FundApi {
     marketBudget?: number
   }) => Promise<FundProfile>
   positionCapital: () => Promise<CapitalSummary>
+  positionTargets: () => Promise<{ budget: number; targets: FundTarget[] }>
+  positionSetTarget: (code: string, targetPct: number | null) => Promise<boolean>
   portfolioAnalysis: () => Promise<PortfolioAnalysis>
   newsRecent: (limit?: number) => Promise<NewsRow[]>
   configGet: () => Promise<AppConfig>

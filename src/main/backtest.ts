@@ -54,13 +54,11 @@ async function navUpTo(pool: Pool, code: string, asof: string, limit: number): P
      ORDER BY trade_date DESC LIMIT $3`,
     [code, asof, limit]
   )
-  return r.rows
-    .reverse()
-    .map((x) => ({
-      date: dateOnly(x.trade_date),
-      nav: Number(x.dwjz),
-      changePct: x.jzzzl === null ? null : Number(x.jzzzl)
-    }))
+  return r.rows.reverse().map((x) => ({
+    date: dateOnly(x.trade_date),
+    nav: Number(x.dwjz),
+    changePct: x.jzzzl === null ? null : Number(x.jzzzl)
+  }))
 }
 
 /** 完整升序净值日期（评估未来窗口用） */
@@ -283,6 +281,7 @@ async function decide(
     news,
     position: null, // 回测口径：不带持仓，避免把现在才有的持仓当成当时信息
     capital: null, // 回测口径：资金计划（预算/闲钱）是"当前"状态，历史采样日不存在，注入即穿越
+    fundTarget: null, // 回测口径：同上——目标占比是"当前"的配置意图，历史采样日不存在
     timeCtx,
     estimate: [] as EstPoint[], // 库中无对应采样日的历史盘中估值（盘后视角）
     metricsBlock,

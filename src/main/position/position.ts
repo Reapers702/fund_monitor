@@ -317,6 +317,106 @@ export async function computeCapitalSummary(pool: Pool, userId: number): Promise
   }
 }
 
+// ---------- 目标仓位（配置视角） ----------
+
+/**
+ * 单只基金的目标仓位与缺口。
+ *
+ * 口径：target_pct 是**占「计划投入基金市场」总额**的比例（不是占已投入、也不是占持仓市值）——
+ * 用户设"白酒 20%"时心里想的是"5 万里拿 1 万买白酒"，闲钱也在分母里。
+ * 距目标差额 = 目标金额 − 当前市值：正数=还差这么多可以补，负数=已超出目标。
+ */
+export interface FundTarget {
+  fundCode: string
+  fundName: string | null
+  /** 目标占比 %；null = 未设目标（仍走择时逻辑） */
+  targetPct: number | null
+  /** 目标金额 = 计划投入 × 目标占比 % */
+  targetAmount: number | null
+  /** 当前市值（无持仓/无行情时为 0） */
+  currentValue: number
+  /** 当前占计划投入 % */
+  currentPct: number | null
+  /** 距目标差额 = 目标金额 − 当前市值 */
+  gapAmount: number | null
+}
+
+/**
+ * 列出启用自选基金的目标仓位与缺口（**包含尚未建仓的基金**）。
+ *
+ * 为什么主体是"启用的自选"而不是"有持仓的"：用户往往先给新基金设目标、再分批买入；
+ * 若只统计有交易记录的基金，目标 20% 的基金在首次买入前根本不会出现，配置缺口无从显示。
+ */
+export async function listFundTargets(
+  pool: Pool,
+  userId: number
+): Promise<{ budget: number; targets: FundTarget[] }> {
+  const budget = (await getProfile(pool, userId)).marketBudget
+  const r = await pool.query<{
+    fund_code: string
+    fund_name: string | null
+    target_pct: string | null
+    shares: string | null
+    latest_nav: string | null
+  }>(
+    `SELECT uf.fund_code,
+            b.fund_name,
+            uf.target_pct,
+            COALESCE(pos.shares, 0) AS shares,
+            nav.dwjz AS latest_nav
+       FROM user_fund uf
+       LEFT JOIN fund_basic b ON b.fund_code = uf.fund_code
+       LEFT JOIN LATERAL (
+         SELECT SUM(CASE WHEN t.trade_type = 'buy' THEN t.shares ELSE -t.shares END) AS shares
+           FROM fund_trade t
+          WHERE t.user_id = uf.user_id AND t.fund_code = uf.fund_code
+       ) pos ON true
+       LEFT JOIN LATERAL (
+         SELECT dwjz FROM fund_nav_daily n
+          WHERE n.fund_code = uf.fund_code ORDER BY n.trade_date DESC LIMIT 1
+       ) nav ON true
+      WHERE uf.user_id = $1 AND uf.is_active = 1
+      ORDER BY uf.fund_code`,
+    [userId]
+  )
+
+  const withBudget = budget > 0
+  const targets: FundTarget[] = r.rows.map((x) => {
+    const shares = Number(x.shares ?? 0)
+    const nav = x.latest_nav === null ? null : Number(x.latest_nav)
+    const currentValue = round2(shares > 0 && nav !== null ? shares * nav : 0)
+    const targetPct = x.target_pct === null ? null : round2(Number(x.target_pct))
+    const targetAmount =
+      targetPct !== null && withBudget ? round2((budget * targetPct) / 100) : null
+    return {
+      fundCode: x.fund_code,
+      fundName: x.fund_name,
+      targetPct,
+      targetAmount,
+      currentValue,
+      currentPct: withBudget ? round2((currentValue / budget) * 100) : null,
+      gapAmount: targetAmount === null ? null : round2(targetAmount - currentValue)
+    }
+  })
+  return { budget, targets }
+}
+
+/** 设置/清除某只基金的目标占比 %（传 null 清除；限当前用户自选） */
+export async function setFundTarget(
+  pool: Pool,
+  userId: number,
+  fundCode: string,
+  targetPct: number | null
+): Promise<boolean> {
+  const v = targetPct === null ? null : Math.max(0, Math.min(100, targetPct))
+  const r = await pool.query(
+    `UPDATE user_fund SET target_pct = $3, updated_at = now()
+      WHERE user_id = $1 AND fund_code = $2`,
+    [userId, fundCode, v]
+  )
+  return (r.rowCount ?? 0) > 0
+}
+
 function round2(n: number): number {
   return Math.round(n * 100) / 100
 }

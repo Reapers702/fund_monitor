@@ -5,7 +5,7 @@ import { describe, it, expect } from 'vitest'
 import { buildUserPrompt, SYSTEM_PROMPT } from '../src/main/analyzer/analyze'
 import type { NavPoint, HoldingWithStock } from '../src/main/storage/queries'
 import type { EstPoint } from '../src/main/storage/queries'
-import type { PositionSummary, CapitalSummary } from '../src/main/position/position'
+import type { PositionSummary, CapitalSummary, FundTarget } from '../src/main/position/position'
 
 const nav: NavPoint[] = [
   { date: '2026-08-12', nav: 1.5, changePct: 0.5 },
@@ -94,6 +94,20 @@ const capital: CapitalSummary = {
   ]
 }
 
+/**
+ * 配置目标 fixture：目标占「计划投入」10% = 1 万元；当前市值 1480 元 → 缺口 8520 元。
+ * 与 capital fixture 同源（计划投入 100000）。
+ */
+const fundTarget: FundTarget = {
+  fundCode: '012322',
+  fundName: '东财云计算指数增强C',
+  targetPct: 10,
+  targetAmount: 10000,
+  currentValue: 1480,
+  currentPct: 1.48,
+  gapAmount: 8520
+}
+
 /** 当日盘中估值采样（时间落在今天，才会被 formatEstimateBlock 收录） */
 function todayEstimate(): EstPoint[] {
   const d = new Date()
@@ -113,6 +127,7 @@ function build(
     estimate?: EstPoint[]
     position?: PositionSummary | null
     capital?: CapitalSummary | null
+    fundTarget?: FundTarget | null
   } = {}
 ): string {
   return buildUserPrompt({
@@ -123,6 +138,7 @@ function build(
     news,
     position: opts.position === undefined ? position : opts.position,
     capital: opts.capital === undefined ? capital : opts.capital,
+    fundTarget: opts.fundTarget === undefined ? fundTarget : opts.fundTarget,
     timeCtx: '分析时点：2026-08-19（周三，交易日，盘后）。最新净值截至 2026-08-18。',
     estimate: opts.estimate ?? todayEstimate(),
     metricsBlock:
@@ -240,6 +256,7 @@ describe('buildUserPrompt（提示词组装）', () => {
       ],
       position: null,
       capital: null,
+      fundTarget: null,
       timeCtx: '分析时点：2026-08-19',
       estimate: [],
       metricsBlock: null,
@@ -305,6 +322,35 @@ describe('buildUserPrompt（提示词组装）', () => {
   it('SYSTEM_PROMPT 把资金与仓位当资金约束（不得超出闲钱）', () => {
     expect(SYSTEM_PROMPT).toContain('剩余闲钱')
     expect(SYSTEM_PROMPT).toContain('已超支）时只考虑持有或减仓')
+  })
+
+  it('配置目标块进入提示词（目标金额 + 距目标缺口）', () => {
+    const p = build()
+    expect(p).toContain('**配置目标**：目标占比 10.00%（= 10000.00 元）')
+    expect(p).toContain('距目标还差 8520.00 元（缺口 85.20%）')
+    expect(p).toContain('这是待配置资金')
+  })
+
+  it('已超目标时给出超出金额（而非缺口）', () => {
+    const p = build({
+      fundTarget: { ...fundTarget, currentValue: 12000, currentPct: 12, gapAmount: -2000 }
+    })
+    expect(p).toContain('已超目标 2000.00 元')
+    expect(p).not.toContain('这是待配置资金')
+  })
+
+  it('未设目标占比时明确说明走择时逻辑（不用配置缺口衡量）', () => {
+    const p = build({
+      fundTarget: { ...fundTarget, targetPct: null, targetAmount: null, gapAmount: null }
+    })
+    expect(p).toContain('未设目标占比')
+    expect(p).not.toContain('**配置目标**')
+  })
+
+  it('SYSTEM_PROMPT 写明「配置目标」与择时并用（缺口是待配置资金）', () => {
+    expect(SYSTEM_PROMPT).toContain('配置目标')
+    expect(SYSTEM_PROMPT).toContain('待配置资金')
+    expect(SYSTEM_PROMPT).toContain('不要用"配置缺口"为它开脱')
   })
 
   it('SYSTEM_PROMPT 约束了 JSON 格式并要求直接用算好的指标', () => {

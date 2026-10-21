@@ -655,11 +655,17 @@ export async function loadFund(code) {
   return { basic, nav, holdings: { reportDate, rows }, est, news, tags, valuation }
 }
 export async function loadBenchmark() {
+  // 线上 analyze.ts 走 crawler/benchmark.ts 实时抓东财 '1.000300'（不入库）；本脚本是纯只读工具、
+  // 不抓网络，故用跟踪沪深300 的指数基金（110020 易方达沪深300ETF联接A）作**代理基准**：
+  // 方向与量级可用，但含跟踪误差与申赎影响，不是精确指数点位。
   const r = await fundPool.query(
-    `SELECT t.d AS date, t.close FROM (SELECT trade_date::text AS d, close FROM stock_daily WHERE stock_code = '000300' ORDER BY trade_date DESC LIMIT 200) t ORDER BY t.d`
+    `SELECT t.d AS date, t.v AS nav FROM (
+       SELECT trade_date::text AS d, dwjz AS v FROM fund_nav_daily
+       WHERE fund_code = '110020' ORDER BY trade_date DESC LIMIT 200
+     ) t ORDER BY t.d`
   )
   if (!r.rows.length) return null
-  return r.rows.map((x) => ({ date: x.date, nav: Number(x.close) }))
+  return r.rows.map((x) => ({ date: x.date, nav: Number(x.nav) }))
 }
 export function formatEstimateBlock(est, today) {
   const localDate = (d) => {

@@ -16,3 +16,6 @@ out
 .trae/
 .tmp-verify/
 .tmp-ab/
+.tmp-cand/
+.tmp-wl/
+.dsh-ops-update-*.lock
