@@ -17,6 +17,8 @@
  *   node scripts/fund-candidates.mjs                        # 低估指数 Top10，各列 C 类候选
  *   node scripts/fund-candidates.mjs --top 20               # 覆盖更多指数
  *   node scripts/fund-candidates.mjs --index 证券公司,中证医疗  # 指定指数（名称需与估值源一致）
+ *   node scripts/fund-candidates.mjs --like 信息技术,消费80     # 按名称找同类（给某只基金找同指数/同主题替代）
+ *   node scripts/fund-candidates.mjs --like X --detail --detail-max 40 --max 40   # 找同指数里规模更大的
  *   node scripts/fund-candidates.mjs --detail               # 抓规模/费率（每指数前 3 只，请求较多）
  *   node scripts/fund-candidates.mjs --out .tmp-cand/candidates.md
  */
@@ -55,10 +57,20 @@ const explicitIndexes = argOf('--index')
   .map((s) => s.trim())
   .filter(Boolean)
 const maxPerIndex = Number(argOf('--max') ?? 6)
+/** --like：按名称关键词找同类（不依赖估值库的指数名），用于"给某只基金找同指数、同主题的替代" */
+const likeKeywords = argOf('--like')
+  ?.split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+/** --detail 时每组的抓取上限（找规模最大的替代时需要放大，如 40） */
+const detailMax = Number(argOf('--detail-max') ?? 3)
 
 // ---------- 1. 取"低估指数"作为筛选方向（本地估值库，客观数据） ----------
 let targets
-if (explicitIndexes?.length) {
+if (likeKeywords?.length) {
+  // 按名称关键词：不是估值库里的指数名，PE/PB 分位置 null（只做同类匹配，不涉及估值判断）
+  targets = likeKeywords.map((k) => ({ index_name: k, pe_percentile: null, pb_percentile: null }))
+} else if (explicitIndexes?.length) {
   const r = await fundPool.query(
     `SELECT index_name, pe_percentile, pb_percentile FROM index_valuation
      WHERE trade_date = (SELECT max(trade_date) FROM index_valuation) AND index_name = ANY($1)`,
@@ -110,6 +122,17 @@ const allFunds = await loadAllFunds()
 
 /** C 类判断：名称以 C / C类 结尾 */
 const isCClass = (name) => /C(类)?$/.test(name.trim())
+/**
+ * 规模风险标记。
+ * 5000 万元是监管关注线（连续 60 个工作日低于该线，管理人须报证监会并提出转换/合并/终止方案；
+ * 很多基金合同直接约定为终止条件）。清盘不会让钱消失，但资金会被锁定数月、变现时点不由持有人选择。
+ */
+function scaleRisk(scale) {
+  if (scale === null || scale === undefined) return '--'
+  if (scale < 0.5) return '⚠️<5000万(关注线以下)'
+  if (scale < 2) return '⚠️偏小'
+  return ''
+}
 /** 指数基金特征 */
 const isIndexFund = (name) => /ETF联接|指数|ETF|LOF/.test(name)
 const cIndexFunds = allFunds.filter((f) => isCClass(f.name) && isIndexFund(f.name))
@@ -128,7 +151,9 @@ function keywordsOf(indexName) {
 // ---------- 3. 匹配 ----------
 const results = []
 for (const t of targets) {
-  const kws = keywordsOf(t.index_name)
+  // --like 模式用严格包含：用户传的是完整指数名（如"消费80"），
+  // 派生关键词（消费80 → 消费）会把全部消费类基金都带出来，找"同指数"时必须精确
+  const kws = likeKeywords?.length ? [t.index_name] : keywordsOf(t.index_name)
   const cands = cIndexFunds.filter((f) => kws.some((k) => f.name.includes(k))).slice(0, maxPerIndex)
   results.push({
     指数: t.index_name,
@@ -138,11 +163,12 @@ for (const t of targets) {
   })
 }
 
-// ---------- 4. 可选：补规模/费率（每指数前 3 只，控制请求量） ----------
+// ---------- 4. 可选：补规模/费率 ----------
+// 抓完按规模降序重排：找"同指数但规模更大"的替代时，规模就是核心信息
 if (wantDetail) {
-  console.log('抓取规模/费率（每指数前 3 只）…')
+  console.log(`抓取规模/费率（每组前 ${detailMax} 只）…`)
   for (const r of results) {
-    for (const c of r.候选.slice(0, 3)) {
+    for (const c of r.候选.slice(0, detailMax)) {
       try {
         const t = await get(`https://fund.eastmoney.com/pingzhongdata/${c.code}.js`)
         // 注意：这里不要对整段做「去引号」——Data_fluctuationScale 是 JSON 字面量，
@@ -155,10 +181,18 @@ if (wantDetail) {
         c.scaleDate = s.categories?.[s.categories.length - 1] ?? null
         c.buyRate = pickRaw('fund_Rate').replace(/"/g, '') || null
         c.minBuy = pickRaw('fund_minsg').replace(/"/g, '') || null
+        // 近几期规模趋势：只看单期容易被季节性影响误判
+        const cats = s.categories ?? []
+        const ser = s.series ?? []
+        c.scaleTrend = ser
+          .slice(-4)
+          .map((x, i, a) => `${cats[cats.length - a.length + i]}=${x.y}`)
+          .join(' → ')
       } catch {
         /* 单只失败不影响整体 */
       }
     }
+    r.候选.sort((a, b) => (b.scale ?? -1) - (a.scale ?? -1))
   }
 }
 
@@ -175,17 +209,19 @@ for (const r of results) {
       代码: c.code,
       名称: c.name,
       规模亿: c.scale ?? '--',
-      规模截止: c.scaleDate ?? '--',
-      申购费率: c.buyRate ?? '--',
-      起购元: c.minBuy ?? '--'
+      规模风险: scaleRisk(c.scale),
+      近4期规模: c.scaleTrend ?? '--',
+      申购费率: c.buyRate ?? '--'
     }))
   )
 }
 
 console.log(
   '\n提示：C 类免申购费但按日计提销售服务费（通常 0.2%~0.8%/年，本工具取不到，需自行核实）；\n' +
-    '持有 <7 天赎回费 1.5%（惩罚性）；规模过小（如 <2 亿）有清盘风险；ETF 联接基金与 ETF 有细微跟踪差异。\n' +
-    '估值分位低 ≠ 会涨。以上仅为客观字段罗列，不构成投资建议。'
+    '持有 <7 天赎回费 1.5%（惩罚性）。\n' +
+    '规模风险：<5000 万元是监管关注线（连续 60 个工作日低于该线，管理人需报证监会并提出转换/合并/终止方案，\n' +
+    '很多基金合同直接约定为终止条件）。清盘不会让钱消失，但资金会被锁定数月至半年、变现时点不由你选。\n' +
+    'ETF 联接基金与 ETF 有细微跟踪差异。估值分位低 ≠ 会涨。以上仅为客观字段罗列，不构成投资建议。'
 )
 
 if (outFile) {
